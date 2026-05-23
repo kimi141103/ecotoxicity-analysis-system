@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import os
 from scipy.stats import norm
 from scipy.optimize import curve_fit
 import matplotlib.pyplot as plt
@@ -11,13 +10,15 @@ st.set_page_config(
     layout="wide"
 )
 
-DATA_FOLDER = "data"
-os.makedirs(DATA_FOLDER, exist_ok=True)
+# ================= SESSION STORAGE =================
+if "control_df" not in st.session_state:
+    st.session_state.control_df = pd.DataFrame()
 
-CONTROL_FILE = os.path.join(DATA_FOLDER, "control_data.csv")
-GOLD_FILE = os.path.join(DATA_FOLDER, "gold_data.csv")
-SILVER_FILE = os.path.join(DATA_FOLDER, "silver_data.csv")
+if "gold_df" not in st.session_state:
+    st.session_state.gold_df = pd.DataFrame()
 
+if "silver_df" not in st.session_state:
+    st.session_state.silver_df = pd.DataFrame()
 
 # ================= FUNCTIONS =================
 def safe_probit(value):
@@ -47,21 +48,18 @@ def toxicity_level(lc50):
         return "Low toxicity"
 
 
-def read_csv_safe(file_path):
-    if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-        return pd.read_csv(file_path)
+def read_data(sample):
+    if sample == "Control":
+        return st.session_state.control_df.copy()
+    elif sample == "Gold":
+        return st.session_state.gold_df.copy()
+    elif sample == "Silver":
+        return st.session_state.silver_df.copy()
     return pd.DataFrame()
 
 
-def save_sample_data(sample, df):
-    if sample == "Control":
-        path = CONTROL_FILE
-    elif sample == "Gold":
-        path = GOLD_FILE
-    else:
-        path = SILVER_FILE
-
-    old_df = read_csv_safe(path)
+def save_data(sample, df):
+    old_df = read_data(sample)
 
     if not old_df.empty:
         combined = pd.concat([old_df, df], ignore_index=True)
@@ -72,7 +70,30 @@ def save_sample_data(sample, df):
     else:
         combined = df
 
-    combined.to_csv(path, index=False)
+    if sample == "Control":
+        st.session_state.control_df = combined
+    elif sample == "Gold":
+        st.session_state.gold_df = combined
+    elif sample == "Silver":
+        st.session_state.silver_df = combined
+
+
+def get_all_data():
+    dfs = []
+
+    if not st.session_state.control_df.empty:
+        dfs.append(st.session_state.control_df)
+
+    if not st.session_state.gold_df.empty:
+        dfs.append(st.session_state.gold_df)
+
+    if not st.session_state.silver_df.empty:
+        dfs.append(st.session_state.silver_df)
+
+    if dfs:
+        return pd.concat(dfs, ignore_index=True)
+
+    return pd.DataFrame()
 
 
 # ================= SIDEBAR =================
@@ -91,6 +112,14 @@ page = st.sidebar.radio(
     ]
 )
 
+if st.sidebar.button("Reset All Data"):
+    st.session_state.control_df = pd.DataFrame()
+    st.session_state.gold_df = pd.DataFrame()
+    st.session_state.silver_df = pd.DataFrame()
+    st.success("All data cleared.")
+    st.rerun()
+
+# ================= TITLE =================
 st.title("Brine Shrimp Ecotoxicity Data Analysis System")
 st.caption("Streamlit Web Version")
 
@@ -98,20 +127,20 @@ st.caption("Streamlit Web Version")
 # ================= HOME =================
 if page == "Home":
     st.subheader("Main Dashboard")
-    st.write(
-        """
-        This web version is a future enhancement of the Python desktop GUI system.
 
-        Main modules:
-        - Input experimental mortality data
-        - Calculate Abbott corrected mortality
-        - View overall saved data
-        - Generate Probit vs Log Concentration graph
-        - Generate Corrected Mortality sigmoid graph
-        - Calculate LC50
-        - Predict LC50 by time
-        """
-    )
+    st.write("""
+    This web system allows users to input their own brine shrimp ecotoxicity data
+    and perform toxicity analysis.
+
+    Main modules:
+    - Input experimental mortality data
+    - Calculate Abbott corrected mortality
+    - View overall data
+    - Generate Probit graph
+    - Generate Sigmoid graph
+    - Calculate LC50
+    - Predict LC50 by time
+    """)
 
 
 # ================= INPUT DATA =================
@@ -189,7 +218,7 @@ elif page == "Input Data":
                 for _, row in df.iterrows():
                     control_dict[int(row["Time"])] = float(row["Mortality Decimal"])
             else:
-                control_df = read_csv_safe(CONTROL_FILE)
+                control_df = read_data("Control")
 
                 if control_df.empty:
                     st.error("Please input and save Control data first.")
@@ -228,7 +257,7 @@ elif page == "Input Data":
             df["Probit"] = probit_values
             df["Log Conc"] = log_values
 
-            save_sample_data(sample, df)
+            save_data(sample, df)
 
             st.success(f"{sample} data saved successfully.")
             st.dataframe(df, use_container_width=True)
@@ -238,18 +267,11 @@ elif page == "Input Data":
 elif page == "Overall Data":
     st.subheader("Overall Experimental Data")
 
-    dfs = []
+    df = get_all_data()
 
-    for path in [CONTROL_FILE, GOLD_FILE, SILVER_FILE]:
-        temp_df = read_csv_safe(path)
-        if not temp_df.empty:
-            dfs.append(temp_df)
-
-    if not dfs:
-        st.warning("No saved data found.")
+    if df.empty:
+        st.warning("No data found. Please input data first.")
     else:
-        df = pd.concat(dfs, ignore_index=True)
-
         col1, col2 = st.columns(2)
 
         with col1:
@@ -272,15 +294,14 @@ elif page == "Overall Data":
 
         st.dataframe(df, use_container_width=True)
 
-        excel_path = os.path.join(DATA_FOLDER, "overall_data.xlsx")
-        df.to_excel(excel_path, index=False)
+        csv = df.to_csv(index=False).encode("utf-8")
 
-        with open(excel_path, "rb") as file:
-            st.download_button(
-                "Download Excel",
-                file,
-                file_name="overall_data.xlsx"
-            )
+        st.download_button(
+            "Download CSV",
+            csv,
+            file_name="overall_data.csv",
+            mime="text/csv"
+        )
 
 
 # ================= PROBIT GRAPH =================
@@ -288,15 +309,12 @@ elif page == "Probit Graph":
     st.subheader("Probit vs Log Concentration Graph")
 
     sample = st.selectbox("Sample", ["Gold", "Silver"])
-    file_path = GOLD_FILE if sample == "Gold" else SILVER_FILE
-
-    df = read_csv_safe(file_path)
+    df = read_data(sample)
 
     if df.empty:
         st.warning(f"No {sample} data found.")
     else:
         df = df[df["Sample"] == sample]
-
         time = st.selectbox("Time", sorted(df["Time"].dropna().unique()))
 
         plot_df = df[df["Time"] == time].copy()
@@ -354,15 +372,12 @@ elif page == "Sigmoid Graph":
     st.subheader("Corrected Mortality Sigmoid Graph")
 
     sample = st.selectbox("Sample", ["Gold", "Silver"])
-    file_path = GOLD_FILE if sample == "Gold" else SILVER_FILE
-
-    df = read_csv_safe(file_path)
+    df = read_data(sample)
 
     if df.empty:
         st.warning(f"No {sample} data found.")
     else:
         df = df[df["Sample"] == sample]
-
         time = st.selectbox("Time", sorted(df["Time"].dropna().unique()))
 
         plot_df = df[df["Time"] == time].copy()
@@ -379,10 +394,10 @@ elif page == "Sigmoid Graph":
         if len(plot_df) < 3:
             st.warning("At least three data points are recommended for sigmoid fitting.")
         else:
-            x = plot_df["Log Conc"].astype(float).values
-            y = plot_df["Corrected Mortality %"].astype(float).values / 100
-
             try:
+                x = plot_df["Log Conc"].astype(float).values
+                y = plot_df["Corrected Mortality %"].astype(float).values / 100
+
                 params, _ = curve_fit(
                     sigmoid_model,
                     x,
@@ -420,9 +435,13 @@ elif page == "Sigmoid Graph":
                 ax.legend()
 
                 ax.text(
-                    0.70,
+                    0.62,
                     0.15,
-                    f"k1 = {k1:.4f}\nk2 = {k2:.4f}\nR² = {r2:.4f}\nLC50 = {lc50:.2f}%",
+                    f"y = 1 / (1 + e^-({k1:.4f}x + {k2:.4f}))\n"
+                    f"k1 = {k1:.4f}\n"
+                    f"k2 = {k2:.4f}\n"
+                    f"R² = {r2:.4f}\n"
+                    f"LC50 = {lc50:.2f}%",
                     transform=ax.transAxes,
                     bbox=dict(facecolor="white", edgecolor="gray")
                 )
@@ -439,15 +458,12 @@ elif page == "LC50 Summary":
     st.subheader("LC50 Calculation Summary")
 
     sample = st.selectbox("Sample", ["Gold", "Silver"])
-    file_path = GOLD_FILE if sample == "Gold" else SILVER_FILE
-
-    df = read_csv_safe(file_path)
+    df = read_data(sample)
 
     if df.empty:
         st.warning(f"No {sample} data found.")
     else:
         df = df[df["Sample"] == sample]
-
         time = st.selectbox("Time", sorted(df["Time"].dropna().unique()))
 
         df = df[df["Time"] == time]
@@ -467,12 +483,10 @@ elif page == "LC50 Summary":
         else:
             x = df["Log Conc"].astype(float).values
 
-            # Probit
             probit_y = df["Probit"].astype(float).values
             slope, intercept = np.polyfit(x, probit_y, 1)
             lc50_probit = 10 ** ((5 - intercept) / slope)
 
-            # Sigmoid
             y = df["Corrected Mortality %"].astype(float).values / 100
             params, _ = curve_fit(sigmoid_model, x, y, p0=[5, -5], maxfev=10000)
             k1, k2 = params
@@ -500,9 +514,7 @@ elif page == "Prediction":
     st.subheader("LC50 Time Prediction")
 
     sample = st.selectbox("Sample", ["Gold", "Silver"])
-    file_path = GOLD_FILE if sample == "Gold" else SILVER_FILE
-
-    df = read_csv_safe(file_path)
+    df = read_data(sample)
 
     if df.empty:
         st.warning(f"No {sample} data found.")
@@ -512,6 +524,9 @@ elif page == "Prediction":
         results = []
 
         for time in sorted(df["Time"].dropna().unique()):
+            if time == 0:
+                continue
+
             temp = df[df["Time"] == time].copy()
             temp = temp[temp["Concentration"] > 0]
 
