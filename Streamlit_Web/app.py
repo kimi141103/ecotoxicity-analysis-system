@@ -1,50 +1,26 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import os
 from scipy.stats import norm
 from scipy.optimize import curve_fit
 import matplotlib.pyplot as plt
 
-st.set_page_config(page_title="Ecotoxicity Analysis System", layout="wide")
+st.set_page_config(
+    page_title="Ecotoxicity Analysis System",
+    layout="wide"
+)
 
-DATA_FOLDER = "data"
-os.makedirs(DATA_FOLDER, exist_ok=True)
+# ================= SESSION STORAGE =================
+if "control_df" not in st.session_state:
+    st.session_state.control_df = pd.DataFrame()
 
-CONTROL_FILE = os.path.join(DATA_FOLDER, "control_data.csv")
-GOLD_FILE = os.path.join(DATA_FOLDER, "gold_data.csv")
-SILVER_FILE = os.path.join(DATA_FOLDER, "silver_data.csv")
+if "gold_df" not in st.session_state:
+    st.session_state.gold_df = pd.DataFrame()
 
+if "silver_df" not in st.session_state:
+    st.session_state.silver_df = pd.DataFrame()
 
 # ================= FUNCTIONS =================
-def read_csv_safe(file_path):
-    if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-        return pd.read_csv(file_path)
-    return pd.DataFrame()
-
-
-def save_sample_data(sample, df):
-    if sample == "Control":
-        file_path = CONTROL_FILE
-    elif sample == "Gold":
-        file_path = GOLD_FILE
-    else:
-        file_path = SILVER_FILE
-
-    old_df = read_csv_safe(file_path)
-
-    if not old_df.empty:
-        combined = pd.concat([old_df, df], ignore_index=True)
-        combined = combined.drop_duplicates(
-            subset=["Sample", "Concentration", "Time", "Replicate"],
-            keep="last"
-        )
-    else:
-        combined = df
-
-    combined.to_csv(file_path, index=False)
-
-
 def safe_probit(value):
     value = min(max(value, 0.001), 0.999)
     return norm.ppf(value) + 5
@@ -61,69 +37,6 @@ def sigmoid_model(x, k1, k2):
     return 1 / (1 + np.exp(-(k1 * x + k2)))
 
 
-def get_control_mortality(time, replicate):
-    control_df = read_csv_safe(CONTROL_FILE)
-
-    if control_df.empty:
-        return 0
-
-    control_df["Time"] = pd.to_numeric(control_df["Time"], errors="coerce")
-    control_df["Replicate"] = pd.to_numeric(control_df["Replicate"], errors="coerce")
-
-    match = control_df[
-        (control_df["Time"] == time) &
-        (control_df["Replicate"] == replicate)
-    ]
-
-    if match.empty:
-        return 0
-
-    return float(match.iloc[0]["Mortality %"])
-
-
-def process_dataframe(df):
-    if df.empty:
-        return df
-
-    df["Initial"] = pd.to_numeric(df["Initial"], errors="coerce")
-    df["Alive"] = pd.to_numeric(df["Alive"], errors="coerce")
-    df["Time"] = pd.to_numeric(df["Time"], errors="coerce")
-    df["Replicate"] = pd.to_numeric(df["Replicate"], errors="coerce")
-    df["Concentration"] = pd.to_numeric(df["Concentration"], errors="coerce")
-
-    df["Alive"] = df["Alive"].clip(lower=0, upper=df["Initial"])
-    df["Dead"] = df["Initial"] - df["Alive"]
-
-    df["Mortality Decimal"] = df["Dead"] / df["Initial"]
-    df["Mortality %"] = df["Mortality Decimal"] * 100
-
-    if df["Sample"].iloc[0] == "Control":
-        df["Control Mortality %"] = 0
-        df["Corrected Mortality %"] = 0
-        df["Probit"] = df["Mortality Decimal"].apply(safe_probit)
-        df["Log Conc"] = 0
-    else:
-        df["Control Mortality %"] = df.apply(
-            lambda row: get_control_mortality(row["Time"], row["Replicate"]),
-            axis=1
-        )
-
-        df["Corrected Mortality %"] = df.apply(
-            lambda row: abbott_corrected(
-                row["Mortality %"] / 100,
-                row["Control Mortality %"] / 100
-            ) * 100,
-            axis=1
-        )
-
-        df["Probit"] = (df["Corrected Mortality %"] / 100).apply(safe_probit)
-        df["Log Conc"] = df["Concentration"].apply(
-            lambda x: np.log10(x) if x > 0 else 0
-        )
-
-    return df.round(4)
-
-
 def toxicity_level(lc50):
     if lc50 < 1:
         return "Extremely toxic"
@@ -133,6 +46,54 @@ def toxicity_level(lc50):
         return "Moderately toxic"
     else:
         return "Low toxicity"
+
+
+def read_data(sample):
+    if sample == "Control":
+        return st.session_state.control_df.copy()
+    elif sample == "Gold":
+        return st.session_state.gold_df.copy()
+    elif sample == "Silver":
+        return st.session_state.silver_df.copy()
+    return pd.DataFrame()
+
+
+def save_data(sample, df):
+    old_df = read_data(sample)
+
+    if not old_df.empty:
+        combined = pd.concat([old_df, df], ignore_index=True)
+        combined = combined.drop_duplicates(
+            subset=["Sample", "Concentration", "Time", "Replicate"],
+            keep="last"
+        )
+    else:
+        combined = df
+
+    if sample == "Control":
+        st.session_state.control_df = combined
+    elif sample == "Gold":
+        st.session_state.gold_df = combined
+    elif sample == "Silver":
+        st.session_state.silver_df = combined
+
+
+def get_all_data():
+    dfs = []
+
+    if not st.session_state.control_df.empty:
+        dfs.append(st.session_state.control_df)
+
+    if not st.session_state.gold_df.empty:
+        dfs.append(st.session_state.gold_df)
+
+    if not st.session_state.silver_df.empty:
+        dfs.append(st.session_state.silver_df)
+
+    if dfs:
+        return pd.concat(dfs, ignore_index=True)
+
+    return pd.DataFrame()
 
 
 # ================= SIDEBAR =================
@@ -152,13 +113,13 @@ page = st.sidebar.radio(
 )
 
 if st.sidebar.button("Reset All Data"):
-    for file in [CONTROL_FILE, GOLD_FILE, SILVER_FILE]:
-        if os.path.exists(file):
-            os.remove(file)
-    st.sidebar.success("All data has been reset.")
+    st.session_state.control_df = pd.DataFrame()
+    st.session_state.gold_df = pd.DataFrame()
+    st.session_state.silver_df = pd.DataFrame()
+    st.success("All data cleared.")
+    st.rerun()
 
-
-# ================= HEADER =================
+# ================= TITLE =================
 st.title("Brine Shrimp Ecotoxicity Data Analysis System")
 st.caption("Streamlit Web Version")
 
@@ -166,25 +127,22 @@ st.caption("Streamlit Web Version")
 # ================= HOME =================
 if page == "Home":
     st.subheader("Main Dashboard")
-    st.write(
-        """
-        This web system allows users to input brine shrimp ecotoxicity data
-        and perform toxicity analysis.
 
-        Main modules:
-        - Input experimental alive data
-        - Automatically calculate dead brine shrimp
-        - Calculate mortality percentage
-        - Calculate Abbott corrected mortality
-        - Generate Probit graph
-        - Generate Sigmoid graph
-        - Calculate LC50
-        - Predict LC50 by time
-        """
-    )
+    st.write("""
+    This web system allows users to input their own brine shrimp ecotoxicity data
+    and perform toxicity analysis.
+
+    Main modules:
+    - Input experimental mortality data
+    - Calculate Abbott corrected mortality
+    - View overall data
+    - Generate Probit graph
+    - Generate Sigmoid graph
+    - Calculate LC50
+    - Predict LC50 by time
+    """)
 
 
-# ================= INPUT DATA =================
 # ================= INPUT DATA =================
 elif page == "Input Data":
     st.subheader("Input Experimental Data")
@@ -194,72 +152,156 @@ elif page == "Input Data":
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        time_interval = st.number_input("Time Interval (min)", min_value=1, value=20)
+        interval = st.number_input("Time Interval (min)", value=20, min_value=1)
 
     with col2:
-        max_time = st.number_input("Maximum Time (min)", min_value=1, value=100)
+        max_time = st.number_input("Maximum Time (min)", value=100, min_value=1)
 
     with col3:
-        number_of_replicates = st.number_input("Number of Replicates", min_value=1, value=2)
+        replicate = st.number_input(
+            "Replicate",
+            value=1 if sample == "Control" else 2,
+            min_value=1
+        )
 
     with col4:
-        default_initial = st.number_input("Default Initial Brine", min_value=1, value=20)
+        initial = st.number_input("Default Initial Brine", value=10, min_value=1)
 
     if sample == "Control":
-        concentration = 0
+        concentrations = [0.0]
+        st.info("Control concentration is automatically set as 0%.")
     else:
-        concentration = st.number_input("Concentration (%)", min_value=0.0, value=10.0)
-
-    times = list(range(0, int(max_time) + 1, int(time_interval)))
+        conc_text = st.text_input("Concentration (%)", "10,30,50")
+        concentrations = [
+            float(x.strip())
+            for x in conc_text.split(",")
+            if x.strip() != ""
+        ]
 
     if st.button("Generate Table"):
         rows = []
+        times = list(range(0, int(max_time) + int(interval), int(interval)))
 
-        for rep in range(1, int(number_of_replicates) + 1):
-            for t in times:
-                rows.append({
-                    "Sample": sample,
-                    "Concentration": concentration,
-                    "Time": t,
-                    "Replicate": rep,
-                    "Initial": default_initial,
-                    "Alive": default_initial
-                })
+        for conc in concentrations:
+            for rep in range(1, int(replicate) + 1):
+                for time in times:
+                    rows.append({
+                        "Sample": sample,
+                        "Concentration": conc,
+                        "Time": time,
+                        "Replicate": rep,
+                        "Initial": initial,
+                        "Alive": initial
+                    })
 
-        input_df = pd.DataFrame(rows)
-        st.session_state["input_df"] = input_df
+        st.session_state.input_df = pd.DataFrame(rows)
 
     if "input_df" in st.session_state:
         st.write("Edit Initial and Alive values:")
 
         edited_df = st.data_editor(
-            st.session_state["input_df"],
-            use_container_width=True,
-            num_rows="fixed",
-            disabled=["Sample", "Concentration", "Time", "Replicate"]
+            st.session_state.input_df,
+            num_rows="dynamic",
+            use_container_width=True
         )
 
-        if st.button("Save Data"):
-            edited_df = process_dataframe(edited_df)
-            save_sample_data(sample, edited_df)
+        if st.button("Calculate and Save Data"):
+            df = edited_df.copy()
+
+            df["Dead"] = df["Initial"] - df["Alive"]
+            df["Mortality Decimal"] = df["Dead"] / df["Initial"]
+            df["Mortality %"] = df["Mortality Decimal"] * 100
+
+            control_dict = {}
+
+            if sample == "Control":
+                for _, row in df.iterrows():
+                    control_dict[int(row["Time"])] = float(row["Mortality Decimal"])
+            else:
+                control_df = read_data("Control")
+
+                if control_df.empty:
+                    st.error("Please input and save Control data first.")
+                    st.stop()
+
+                for _, row in control_df.iterrows():
+                    control_dict[int(row["Time"])] = float(row["Mortality Decimal"])
+
+            control_values = []
+            corrected_values = []
+            probit_values = []
+            log_values = []
+
+            for _, row in df.iterrows():
+                mortality = float(row["Mortality Decimal"])
+                time = int(row["Time"])
+
+                if sample == "Control":
+                    control = mortality
+                    corrected = mortality
+                else:
+                    control = control_dict.get(time, 0)
+                    corrected = abbott_corrected(mortality, control)
+
+                control_values.append(round(control * 100, 2))
+                corrected_values.append(round(corrected * 100, 2))
+                probit_values.append(round(safe_probit(corrected), 4))
+
+                if row["Concentration"] == 0:
+                    log_values.append("")
+                else:
+                    log_values.append(round(np.log10(row["Concentration"]), 4))
+
+            df["Control Mortality %"] = control_values
+            df["Corrected Mortality %"] = corrected_values
+            df["Probit"] = probit_values
+            df["Log Conc"] = log_values
+
+            save_data(sample, df)
+
             st.success(f"{sample} data saved successfully.")
-            st.dataframe(edited_df, use_container_width=True)
+            st.dataframe(df, use_container_width=True)
 
 
 # ================= OVERALL DATA =================
 elif page == "Overall Data":
     st.subheader("Overall Experimental Data")
 
-    control_df = read_csv_safe(CONTROL_FILE)
-    gold_df = read_csv_safe(GOLD_FILE)
-    silver_df = read_csv_safe(SILVER_FILE)
+    df = get_all_data()
 
-    all_df = pd.concat([control_df, gold_df, silver_df], ignore_index=True)
-
-    if all_df.empty:
+    if df.empty:
         st.warning("No data found. Please input data first.")
     else:
-        st.dataframe(all_df, use_container_width=True)
+        col1, col2 = st.columns(2)
+
+        with col1:
+            sample_filter = st.selectbox(
+                "Filter Sample",
+                ["All", "Control", "Gold", "Silver"]
+            )
+
+        with col2:
+            conc_filter = st.text_input("Filter Concentration", "")
+
+        if sample_filter != "All":
+            df = df[df["Sample"] == sample_filter]
+
+        if conc_filter.strip() != "":
+            try:
+                df = df[df["Concentration"].astype(float) == float(conc_filter)]
+            except:
+                st.error("Concentration must be numeric.")
+
+        st.dataframe(df, use_container_width=True)
+
+        csv = df.to_csv(index=False).encode("utf-8")
+
+        st.download_button(
+            "Download CSV",
+            csv,
+            file_name="overall_data.csv",
+            mime="text/csv"
+        )
 
 
 # ================= PROBIT GRAPH =================
@@ -267,37 +309,45 @@ elif page == "Probit Graph":
     st.subheader("Probit vs Log Concentration Graph")
 
     sample = st.selectbox("Sample", ["Gold", "Silver"])
-    file_path = GOLD_FILE if sample == "Gold" else SILVER_FILE
-
-    df = read_csv_safe(file_path)
+    df = read_data(sample)
 
     if df.empty:
         st.warning(f"No {sample} data found.")
     else:
-        df = process_dataframe(df)
-        df = df[(df["Sample"] == sample) & (df["Concentration"] > 0)]
+        df = df[df["Sample"] == sample]
+        time = st.selectbox("Time", sorted(df["Time"].dropna().unique()))
 
-        time = st.selectbox("Select Time (min)", sorted(df["Time"].dropna().unique()))
-        plot_df = df[df["Time"] == time]
+        plot_df = df[df["Time"] == time].copy()
+        plot_df = plot_df[plot_df["Concentration"] > 0]
 
-        if len(plot_df) < 3:
-            st.warning("At least three data points are recommended for probit analysis.")
+        plot_df["Log Conc"] = pd.to_numeric(plot_df["Log Conc"], errors="coerce")
+        plot_df["Probit"] = pd.to_numeric(plot_df["Probit"], errors="coerce")
+        plot_df = plot_df.dropna(subset=["Log Conc", "Probit"])
+
+        if len(plot_df) < 2:
+            st.warning("At least two data points are required.")
         else:
             x = plot_df["Log Conc"].astype(float).values
             y = plot_df["Probit"].astype(float).values
 
             slope, intercept = np.polyfit(x, y, 1)
-            lc50 = 10 ** ((5 - intercept) / slope)
+            y_pred = slope * x + intercept
+
+            ss_res = np.sum((y - y_pred) ** 2)
+            ss_total = np.sum((y - np.mean(y)) ** 2)
+            r2 = 1 - (ss_res / ss_total) if ss_total != 0 else 0
+
+            log_lc50 = (5 - intercept) / slope
+            lc50 = 10 ** log_lc50
 
             fig, ax = plt.subplots(figsize=(10, 5.5))
             ax.scatter(x, y, label="Replicate Data Points")
 
             x_line = np.linspace(min(x) - 0.05, max(x) + 0.05, 100)
-            y_line = slope * x_line + intercept
+            ax.plot(x_line, slope * x_line + intercept, label="Linear Regression Line")
 
-            ax.plot(x_line, y_line, label="Linear Regression")
-            ax.axhline(5, linestyle="--", label="Probit 5")
-            ax.axvline(np.log10(lc50), linestyle="--", label=f"LC50 = {lc50:.2f}%")
+            ax.axhline(5, linestyle="--", label="Probit 5 = 50% Mortality")
+            ax.axvline(log_lc50, linestyle="--", label=f"LC50 = {lc50:.2f}%")
 
             ax.set_title(f"Probit vs Log Concentration ({sample}, {time} min)")
             ax.set_xlabel("Log Concentration")
@@ -307,10 +357,9 @@ elif page == "Probit Graph":
 
             ax.text(
                 0.05,
-                0.95,
-                f"y = {slope:.4f}x + {intercept:.4f}\nLC50 = {lc50:.2f}%",
+                0.15,
+                f"y = {slope:.4f}x + {intercept:.4f}\nR² = {r2:.4f}\nLC50 = {lc50:.2f}%",
                 transform=ax.transAxes,
-                verticalalignment="top",
                 bbox=dict(facecolor="white", edgecolor="gray")
             )
 
@@ -323,26 +372,32 @@ elif page == "Sigmoid Graph":
     st.subheader("Corrected Mortality Sigmoid Graph")
 
     sample = st.selectbox("Sample", ["Gold", "Silver"])
-    file_path = GOLD_FILE if sample == "Gold" else SILVER_FILE
-
-    df = read_csv_safe(file_path)
+    df = read_data(sample)
 
     if df.empty:
         st.warning(f"No {sample} data found.")
     else:
-        df = process_dataframe(df)
-        df = df[(df["Sample"] == sample) & (df["Concentration"] > 0)]
+        df = df[df["Sample"] == sample]
+        time = st.selectbox("Time", sorted(df["Time"].dropna().unique()))
 
-        time = st.selectbox("Select Time (min)", sorted(df["Time"].dropna().unique()))
-        plot_df = df[df["Time"] == time]
+        plot_df = df[df["Time"] == time].copy()
+        plot_df = plot_df[plot_df["Concentration"] > 0]
+
+        plot_df["Log Conc"] = pd.to_numeric(plot_df["Log Conc"], errors="coerce")
+        plot_df["Corrected Mortality %"] = pd.to_numeric(
+            plot_df["Corrected Mortality %"],
+            errors="coerce"
+        )
+
+        plot_df = plot_df.dropna(subset=["Log Conc", "Corrected Mortality %"])
 
         if len(plot_df) < 3:
             st.warning("At least three data points are recommended for sigmoid fitting.")
         else:
-            x = plot_df["Log Conc"].astype(float).values
-            y = plot_df["Corrected Mortality %"].astype(float).values / 100
-
             try:
+                x = plot_df["Log Conc"].astype(float).values
+                y = plot_df["Corrected Mortality %"].astype(float).values / 100
+
                 params, _ = curve_fit(
                     sigmoid_model,
                     x,
@@ -362,6 +417,7 @@ elif page == "Sigmoid Graph":
                 lc50 = 10 ** log_lc50
 
                 fig, ax = plt.subplots(figsize=(10, 5.5))
+
                 ax.scatter(x, y * 100, label="Replicate Data Points")
 
                 x_line = np.linspace(min(x) - 0.05, max(x) + 0.05, 300)
@@ -379,9 +435,13 @@ elif page == "Sigmoid Graph":
                 ax.legend()
 
                 ax.text(
-                    0.70,
+                    0.62,
                     0.15,
-                    f"k1 = {k1:.4f}\nk2 = {k2:.4f}\nR² = {r2:.4f}\nLC50 = {lc50:.2f}%",
+                    f"y = 1 / (1 + e^-({k1:.4f}x + {k2:.4f}))\n"
+                    f"k1 = {k1:.4f}\n"
+                    f"k2 = {k2:.4f}\n"
+                    f"R² = {r2:.4f}\n"
+                    f"LC50 = {lc50:.2f}%",
                     transform=ax.transAxes,
                     bbox=dict(facecolor="white", edgecolor="gray")
                 )
@@ -398,18 +458,25 @@ elif page == "LC50 Summary":
     st.subheader("LC50 Calculation Summary")
 
     sample = st.selectbox("Sample", ["Gold", "Silver"])
-    file_path = GOLD_FILE if sample == "Gold" else SILVER_FILE
-
-    df = read_csv_safe(file_path)
+    df = read_data(sample)
 
     if df.empty:
         st.warning(f"No {sample} data found.")
     else:
-        df = process_dataframe(df)
-        df = df[(df["Sample"] == sample) & (df["Concentration"] > 0)]
+        df = df[df["Sample"] == sample]
+        time = st.selectbox("Time", sorted(df["Time"].dropna().unique()))
 
-        time = st.selectbox("Select Time (min)", sorted(df["Time"].dropna().unique()))
         df = df[df["Time"] == time]
+        df = df[df["Concentration"] > 0]
+
+        df["Log Conc"] = pd.to_numeric(df["Log Conc"], errors="coerce")
+        df["Probit"] = pd.to_numeric(df["Probit"], errors="coerce")
+        df["Corrected Mortality %"] = pd.to_numeric(
+            df["Corrected Mortality %"],
+            errors="coerce"
+        )
+
+        df = df.dropna(subset=["Log Conc", "Probit", "Corrected Mortality %"])
 
         if len(df) < 3:
             st.warning("At least three data points are recommended.")
@@ -421,31 +488,25 @@ elif page == "LC50 Summary":
             lc50_probit = 10 ** ((5 - intercept) / slope)
 
             y = df["Corrected Mortality %"].astype(float).values / 100
+            params, _ = curve_fit(sigmoid_model, x, y, p0=[5, -5], maxfev=10000)
+            k1, k2 = params
+            lc50_sigmoid = 10 ** (-k2 / k1)
 
-            try:
-                params, _ = curve_fit(
-                    sigmoid_model,
-                    x,
-                    y,
-                    p0=[5, -5],
-                    maxfev=10000
-                )
+            result_df = pd.DataFrame({
+                "Method": ["Probit Analysis", "Sigmoid Analysis"],
+                "LC50 (%)": [round(lc50_probit, 4), round(lc50_sigmoid, 4)],
+                "Toxicity Interpretation": [
+                    toxicity_level(lc50_probit),
+                    toxicity_level(lc50_sigmoid)
+                ]
+            })
 
-                k1, k2 = params
-                lc50_sigmoid = 10 ** (-k2 / k1)
+            st.dataframe(result_df, use_container_width=True)
 
-                summary_df = pd.DataFrame({
-                    "Sample": [sample],
-                    "Time (min)": [time],
-                    "LC50 Probit (%)": [round(lc50_probit, 4)],
-                    "LC50 Sigmoid (%)": [round(lc50_sigmoid, 4)],
-                    "Toxicity Level": [toxicity_level(lc50_sigmoid)]
-                })
-
-                st.dataframe(summary_df, use_container_width=True)
-
-            except Exception as e:
-                st.error(f"LC50 calculation failed: {e}")
+            st.info(
+                "Probit LC50 is recommended as the main toxicological LC50 value, "
+                "while sigmoid LC50 is used for dose-response model comparison."
+            )
 
 
 # ================= PREDICTION =================
@@ -453,56 +514,67 @@ elif page == "Prediction":
     st.subheader("LC50 Time Prediction")
 
     sample = st.selectbox("Sample", ["Gold", "Silver"])
-    file_path = GOLD_FILE if sample == "Gold" else SILVER_FILE
-
-    df = read_csv_safe(file_path)
+    df = read_data(sample)
 
     if df.empty:
         st.warning(f"No {sample} data found.")
     else:
-        df = process_dataframe(df)
-        df = df[(df["Sample"] == sample) & (df["Concentration"] > 0)]
+        df = df[df["Sample"] == sample]
 
-        prediction_results = []
+        results = []
 
         for time in sorted(df["Time"].dropna().unique()):
-            temp_df = df[df["Time"] == time]
+            if time == 0:
+                continue
 
-            if len(temp_df) >= 3:
-                try:
-                    x = temp_df["Log Conc"].astype(float).values
-                    y = temp_df["Corrected Mortality %"].astype(float).values / 100
+            temp = df[df["Time"] == time].copy()
+            temp = temp[temp["Concentration"] > 0]
 
-                    params, _ = curve_fit(
-                        sigmoid_model,
-                        x,
-                        y,
-                        p0=[5, -5],
-                        maxfev=10000
-                    )
+            temp["Log Conc"] = pd.to_numeric(temp["Log Conc"], errors="coerce")
+            temp["Corrected Mortality %"] = pd.to_numeric(
+                temp["Corrected Mortality %"],
+                errors="coerce"
+            )
 
-                    k1, k2 = params
-                    lc50 = 10 ** (-k2 / k1)
+            temp = temp.dropna(subset=["Log Conc", "Corrected Mortality %"])
 
-                    prediction_results.append({
-                        "Time (min)": time,
-                        "Predicted LC50 (%)": round(lc50, 4),
-                        "Toxicity Level": toxicity_level(lc50)
-                    })
+            if len(temp) < 3:
+                continue
 
-                except:
-                    pass
+            try:
+                x = temp["Log Conc"].astype(float).values
+                y = temp["Corrected Mortality %"].astype(float).values / 100
 
-        if prediction_results:
-            result_df = pd.DataFrame(prediction_results)
-            st.dataframe(result_df, use_container_width=True)
+                params, _ = curve_fit(sigmoid_model, x, y, p0=[5, -5], maxfev=10000)
+                k1, k2 = params
 
-            fig, ax = plt.subplots(figsize=(10, 5.5))
-            ax.plot(result_df["Time (min)"], result_df["Predicted LC50 (%)"], marker="o")
-            ax.set_title(f"Predicted LC50 Over Time ({sample})")
-            ax.set_xlabel("Time (min)")
-            ax.set_ylabel("LC50 (%)")
-            ax.grid(True, linestyle="--", alpha=0.5)
-            st.pyplot(fig)
+                lc50 = 10 ** (-k2 / k1)
+
+                results.append({
+                    "Time": time,
+                    "LC50 (%)": round(lc50, 4)
+                })
+
+            except:
+                continue
+
+        if len(results) < 2:
+            st.warning("Not enough valid LC50 values for prediction.")
         else:
-            st.warning("Not enough data for prediction.")
+            lc50_df = pd.DataFrame(results)
+            st.dataframe(lc50_df, use_container_width=True)
+
+            target_time = st.number_input("Predict Time (min)", value=45.0)
+
+            times = lc50_df["Time"].astype(float).values
+            lc50_values = lc50_df["LC50 (%)"].astype(float).values
+
+            if target_time < min(times) or target_time > max(times):
+                coeff = np.polyfit(times, lc50_values, 1)
+                predicted_lc50 = coeff[0] * target_time + coeff[1]
+                st.warning("This is outside experimental range. Result is extrapolated.")
+            else:
+                predicted_lc50 = np.interp(target_time, times, lc50_values)
+
+            st.success(f"Predicted LC50 at {target_time:.2f} min = {predicted_lc50:.4f}%")
+            st.write(f"Toxicity Interpretation: **{toxicity_level(predicted_lc50)}**")
