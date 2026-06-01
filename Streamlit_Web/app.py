@@ -200,7 +200,7 @@ elif page == "Input Data":
         max_time = st.number_input("Maximum Time (min)", min_value=1, value=100)
 
     with col3:
-        replicate = st.number_input("Replicate", min_value=1, value=1)
+        number_of_replicates = st.number_input("Number of Replicates", min_value=1, value=2)
 
     with col4:
         initial = st.number_input("Initial Brine", min_value=1, value=20)
@@ -213,16 +213,21 @@ elif page == "Input Data":
     times = list(range(0, int(max_time) + 1, int(time_interval)))
 
     if st.button("Generate Table"):
-        input_df = pd.DataFrame({
-            "Sample": [sample] * len(times),
-            "Concentration": [concentration] * len(times),
-            "Time": times,
-            "Replicate": [replicate] * len(times),
-            "Initial": [initial] * len(times),
-            "Alive": [initial] * len(times),
-            "Dead": [0] * len(times)
-        })
+        rows = []
 
+        for rep in range(1, int(number_of_replicates) + 1):
+            for t in times:
+                rows.append({
+                    "Sample": sample,
+                    "Concentration": concentration,
+                    "Time": t,
+                    "Replicate": rep,
+                    "Initial": initial,
+                    "Alive": initial,
+                    "Dead": 0
+                })
+
+        input_df = pd.DataFrame(rows)
         st.session_state["input_df"] = input_df
 
     if "input_df" in st.session_state:
@@ -280,7 +285,6 @@ elif page == "Probit Graph":
             y = plot_df["Probit"].astype(float).values
 
             slope, intercept = np.polyfit(x, y, 1)
-            y_pred = slope * x + intercept
             lc50 = 10 ** ((5 - intercept) / slope)
 
             fig, ax = plt.subplots(figsize=(10, 5.5))
@@ -356,7 +360,6 @@ elif page == "Sigmoid Graph":
                 lc50 = 10 ** log_lc50
 
                 fig, ax = plt.subplots(figsize=(10, 5.5))
-
                 ax.scatter(x, y * 100, label="Replicate Data Points")
 
                 x_line = np.linspace(min(x) - 0.05, max(x) + 0.05, 300)
