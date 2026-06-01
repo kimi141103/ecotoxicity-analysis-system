@@ -6,10 +6,7 @@ from scipy.stats import norm
 from scipy.optimize import curve_fit
 import matplotlib.pyplot as plt
 
-st.set_page_config(
-    page_title="Ecotoxicity Analysis System",
-    layout="wide"
-)
+st.set_page_config(page_title="Ecotoxicity Analysis System", layout="wide")
 
 DATA_FOLDER = "data"
 os.makedirs(DATA_FOLDER, exist_ok=True)
@@ -90,10 +87,12 @@ def process_dataframe(df):
 
     df["Initial"] = pd.to_numeric(df["Initial"], errors="coerce")
     df["Alive"] = pd.to_numeric(df["Alive"], errors="coerce")
-    df["Dead"] = pd.to_numeric(df["Dead"], errors="coerce")
     df["Time"] = pd.to_numeric(df["Time"], errors="coerce")
     df["Replicate"] = pd.to_numeric(df["Replicate"], errors="coerce")
     df["Concentration"] = pd.to_numeric(df["Concentration"], errors="coerce")
+
+    df["Alive"] = df["Alive"].clip(lower=0, upper=df["Initial"])
+    df["Dead"] = df["Initial"] - df["Alive"]
 
     df["Mortality Decimal"] = df["Dead"] / df["Initial"]
     df["Mortality %"] = df["Mortality Decimal"] * 100
@@ -169,14 +168,14 @@ if page == "Home":
     st.subheader("Main Dashboard")
     st.write(
         """
-        This web system allows users to input their own brine shrimp ecotoxicity data
+        This web system allows users to input brine shrimp ecotoxicity data
         and perform toxicity analysis.
 
         Main modules:
-
-        - Input experimental mortality data
+        - Input experimental alive data
+        - Automatically calculate dead brine shrimp
+        - Calculate mortality percentage
         - Calculate Abbott corrected mortality
-        - View overall data
         - Generate Probit graph
         - Generate Sigmoid graph
         - Calculate LC50
@@ -223,8 +222,7 @@ elif page == "Input Data":
                     "Time": t,
                     "Replicate": rep,
                     "Initial": initial,
-                    "Alive": initial,
-                    "Dead": 0
+                    "Alive": initial
                 })
 
         input_df = pd.DataFrame(rows)
@@ -234,7 +232,8 @@ elif page == "Input Data":
         edited_df = st.data_editor(
             st.session_state["input_df"],
             use_container_width=True,
-            num_rows="fixed"
+            num_rows="fixed",
+            disabled=["Sample", "Concentration", "Time", "Replicate", "Initial"]
         )
 
         if st.button("Save Data"):
