@@ -185,6 +185,7 @@ if page == "Home":
 
 
 # ================= INPUT DATA =================
+# ================= INPUT DATA =================
 elif page == "Input Data":
     st.subheader("Input Experimental Data")
 
@@ -202,7 +203,7 @@ elif page == "Input Data":
         number_of_replicates = st.number_input("Number of Replicates", min_value=1, value=2)
 
     with col4:
-        initial = st.number_input("Initial Brine", min_value=1, value=20)
+        default_initial = st.number_input("Default Initial Brine", min_value=1, value=20)
 
     if sample == "Control":
         concentration = 0
@@ -221,19 +222,21 @@ elif page == "Input Data":
                     "Concentration": concentration,
                     "Time": t,
                     "Replicate": rep,
-                    "Initial": initial,
-                    "Alive": initial
+                    "Initial": default_initial,
+                    "Alive": default_initial
                 })
 
         input_df = pd.DataFrame(rows)
         st.session_state["input_df"] = input_df
 
     if "input_df" in st.session_state:
+        st.write("Edit Initial and Alive values:")
+
         edited_df = st.data_editor(
             st.session_state["input_df"],
             use_container_width=True,
             num_rows="fixed",
-            disabled=["Sample", "Concentration", "Time", "Replicate", "Initial"]
+            disabled=["Sample", "Concentration", "Time", "Replicate"]
         )
 
         if st.button("Save Data"):
