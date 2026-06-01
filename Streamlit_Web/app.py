@@ -216,7 +216,8 @@ elif page == "Input Data":
 
             if sample == "Control":
                 for _, row in df.iterrows():
-                    control_dict[int(row["Time"])] = float(row["Mortality Decimal"])
+                    key = (int(row["Time"]), int(row["Replicate"]))
+                    control_dict[key] = float(row["Mortality Decimal"])
             else:
                 control_df = read_data("Control")
 
@@ -225,7 +226,8 @@ elif page == "Input Data":
                     st.stop()
 
                 for _, row in control_df.iterrows():
-                    control_dict[int(row["Time"])] = float(row["Mortality Decimal"])
+                    key = (int(row["Time"]), int(row["Replicate"]))
+                    control_dict[key] = float(row["Mortality Decimal"])
 
             control_values = []
             corrected_values = []
@@ -235,12 +237,13 @@ elif page == "Input Data":
             for _, row in df.iterrows():
                 mortality = float(row["Mortality Decimal"])
                 time = int(row["Time"])
+                rep = int(row["Replicate"])
 
                 if sample == "Control":
                     control = mortality
                     corrected = mortality
                 else:
-                    control = control_dict.get(time, 0)
+                    control = control_dict.get((time, rep), 0)
                     corrected = abbott_corrected(mortality, control)
 
                 control_values.append(round(control * 100, 2))
