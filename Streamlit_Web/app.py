@@ -10,14 +10,11 @@ st.set_page_config(
 )
 
 # ================= SESSION STORAGE =================
-if "control_df" not in st.session_state:
-    st.session_state.control_df = pd.DataFrame()
+if "data_store" not in st.session_state:
+    st.session_state.data_store = {}
 
-if "gold_df" not in st.session_state:
-    st.session_state.gold_df = pd.DataFrame()
-
-if "silver_df" not in st.session_state:
-    st.session_state.silver_df = pd.DataFrame()
+if "input_df" not in st.session_state:
+    st.session_state.input_df = pd.DataFrame()
 
 
 # ================= FUNCTIONS =================
@@ -41,7 +38,7 @@ def sigmoid_model_percent(x, k, lc50):
     y = 100 / [1 + e^(-k(x - LC50))]
 
     y = corrected mortality (%)
-    x = serum concentration (%)
+    x = sample concentration (%)
     k = slope of the curve
     LC50 = concentration causing 50% mortality
     """
@@ -62,51 +59,61 @@ def toxicity_level(lc50):
         return "Low toxicity"
 
 
-def read_data(sample):
-    if sample == "Control":
-        return st.session_state.control_df.copy()
-    elif sample == "Gold":
-        return st.session_state.gold_df.copy()
-    elif sample == "Silver":
-        return st.session_state.silver_df.copy()
+def save_data(sample_name, df):
+    sample_name = sample_name.strip()
 
-    return pd.DataFrame()
+    if sample_name in st.session_state.data_store:
+        old_df = st.session_state.data_store[sample_name]
 
-
-def save_data(sample, df):
-    old_df = read_data(sample)
-
-    if not old_df.empty:
         combined = pd.concat([old_df, df], ignore_index=True)
         combined = combined.drop_duplicates(
             subset=["Sample", "Concentration", "Time", "Replicate"],
             keep="last"
         )
     else:
-        combined = df
+        combined = df.copy()
 
-    if sample == "Control":
-        st.session_state.control_df = combined
-    elif sample == "Gold":
-        st.session_state.gold_df = combined
-    elif sample == "Silver":
-        st.session_state.silver_df = combined
+    st.session_state.data_store[sample_name] = combined
+
+
+def read_data(sample_name):
+    sample_name = sample_name.strip()
+
+    if sample_name in st.session_state.data_store:
+        return st.session_state.data_store[sample_name].copy()
+
+    return pd.DataFrame()
 
 
 def get_all_data():
     dfs = []
 
-    if not st.session_state.control_df.empty:
-        dfs.append(st.session_state.control_df)
-
-    if not st.session_state.gold_df.empty:
-        dfs.append(st.session_state.gold_df)
-
-    if not st.session_state.silver_df.empty:
-        dfs.append(st.session_state.silver_df)
+    for sample_name, df in st.session_state.data_store.items():
+        if not df.empty:
+            dfs.append(df)
 
     if dfs:
         return pd.concat(dfs, ignore_index=True)
+
+    return pd.DataFrame()
+
+
+def get_sample_names(include_control=True):
+    sample_names = list(st.session_state.data_store.keys())
+
+    if include_control:
+        return sample_names
+
+    return [
+        name for name in sample_names
+        if name.lower() != "control"
+    ]
+
+
+def get_control_data():
+    for sample_name, df in st.session_state.data_store.items():
+        if sample_name.lower() == "control":
+            return df.copy()
 
     return pd.DataFrame()
 
@@ -128,7 +135,6 @@ def get_control_mortality(control_df, time, replicate):
     control_df["Time"] = pd.to_numeric(control_df["Time"], errors="coerce")
     control_df["Replicate"] = pd.to_numeric(control_df["Replicate"], errors="coerce")
 
-    # Create Mortality Decimal if the column is missing
     if "Mortality Decimal" not in control_df.columns:
         if "Mortality %" in control_df.columns:
             control_df["Mortality Decimal"] = pd.to_numeric(
@@ -192,7 +198,6 @@ def fit_sigmoid_lc50(df):
     x = plot_df["Concentration"].astype(float).values
     y = plot_df["Corrected Mortality %"].astype(float).values
 
-    # Initial guess: slope k = 0.15, LC50 near the median concentration.
     p0 = [0.15, np.median(x)]
 
     upper_lc50_bound = max(100.0, float(np.max(x)) * 5)
@@ -213,9 +218,8 @@ def fit_sigmoid_lc50(df):
     ss_total = np.sum((y - np.mean(y)) ** 2)
 
     r2 = 1 - (ss_res / ss_total) if ss_total != 0 else 0
-    rmse = np.sqrt(np.mean((y - y_pred) ** 2))
 
-    return plot_df, k, lc50, r2, rmse
+    return plot_df, k, lc50, r2
 
 
 def manual_linear_interpolation_lc50(df):
@@ -267,7 +271,7 @@ def manual_linear_interpolation_lc50(df):
     return np.nan, mean_df, "50% mortality is outside the observed concentration range."
 
 
-def create_sigmoid_figure(sample, time, plot_df, k, lc50, r2, rmse):
+def create_sigmoid_figure(sample_name, time, plot_df, k, lc50, r2):
     """
     Create a concentration-response sigmoid graph with:
     - all replicate points
@@ -290,7 +294,6 @@ def create_sigmoid_figure(sample, time, plot_df, k, lc50, r2, rmse):
 
     fig, ax = plt.subplots(figsize=(10, 5.8))
 
-    # Jitter replicate points slightly so repeated points can be seen clearly.
     x_jitter = np.zeros_like(x, dtype=float)
 
     for conc in sorted(np.unique(x)):
@@ -306,7 +309,6 @@ def create_sigmoid_figure(sample, time, plot_df, k, lc50, r2, rmse):
         label="Replicate data points"
     )
 
-    # Error bars: mean ± standard deviation
     ax.errorbar(
         summary_df["Concentration"],
         summary_df["mean"],
@@ -346,11 +348,11 @@ def create_sigmoid_figure(sample, time, plot_df, k, lc50, r2, rmse):
     )
 
     ax.set_title(
-        f"Concentration-Response Sigmoid Curve ({sample}, {time} min)",
+        f"Concentration-Response Sigmoid Curve ({sample_name}, {time} min)",
         fontsize=14
     )
 
-    ax.set_xlabel("Serum Concentration (%)", fontsize=12)
+    ax.set_xlabel("Sample Concentration (%)", fontsize=12)
     ax.set_ylabel("Corrected Mortality (%)", fontsize=12)
     ax.set_ylim(-5, 105)
     ax.set_xlim(x_min, x_max)
@@ -359,12 +361,11 @@ def create_sigmoid_figure(sample, time, plot_df, k, lc50, r2, rmse):
 
     ax.text(
         0.58,
-        0.15,
+        0.18,
         f"y = 100 / [1 + e^(-k(x - LC50))]\n"
         f"k = {k:.4f}\n"
         f"LC50 = {lc50:.2f}%\n"
-        f"R² = {r2:.4f}\n"
-        f"RMSE = {rmse:.4f}",
+        f"R² = {r2:.4f}",
         transform=ax.transAxes,
         bbox=dict(facecolor="white", edgecolor="gray", alpha=0.95)
     )
@@ -390,9 +391,8 @@ page = st.sidebar.radio(
 )
 
 if st.sidebar.button("Reset All Data"):
-    st.session_state.control_df = pd.DataFrame()
-    st.session_state.gold_df = pd.DataFrame()
-    st.session_state.silver_df = pd.DataFrame()
+    st.session_state.data_store = {}
+    st.session_state.input_df = pd.DataFrame()
     st.success("All data cleared.")
     st.rerun()
 
@@ -413,7 +413,7 @@ if page == "Home":
     Main modules:
     - Input experimental alive/dead data
     - Calculate mortality percentage
-    - Calculate Abbott corrected mortality
+    - Optionally apply Abbott corrected mortality
     - View overall data
     - Generate concentration-response sigmoid graph with replicate points and error bars
     - Calculate LC50 using the logistic sigmoid model
@@ -423,7 +423,7 @@ if page == "Home":
 
     st.info(
         "Selected model: y = 100 / [1 + e^(-k(x - LC50))], where y is corrected mortality (%) "
-        "and x is serum concentration (%)."
+        "and x is sample concentration (%)."
     )
 
 
@@ -431,7 +431,26 @@ if page == "Home":
 elif page == "Input Data":
     st.subheader("Input Experimental Data")
 
-    sample = st.selectbox("Sample Type", ["Control", "Gold", "Silver"])
+    data_type = st.radio(
+        "Data Type",
+        ["Control", "Treatment Sample"],
+        horizontal=True
+    )
+
+    if data_type == "Control":
+        sample_name = "Control"
+        use_abbott = False
+    else:
+        sample_name = st.text_input(
+            "Sample Name",
+            value="Gold",
+            help="You can enter any sample name such as Gold, Silver, Carbon, Copper, Zinc, etc."
+        ).strip()
+
+        use_abbott = st.checkbox(
+            "Apply Abbott correction using saved control data",
+            value=True
+        )
 
     col1, col2, col3, col4 = st.columns(4)
 
@@ -451,7 +470,7 @@ elif page == "Input Data":
     with col4:
         initial = st.number_input("Default Initial Brine", value=10, min_value=1)
 
-    if sample == "Control":
+    if data_type == "Control":
         concentrations = [0.0]
         st.info("Control concentration is automatically set as 0%.")
     else:
@@ -467,6 +486,10 @@ elif page == "Input Data":
             st.error("Please enter concentrations as numbers separated by commas, for example: 10,30,50")
             st.stop()
 
+    if not sample_name:
+        st.error("Please enter a sample name.")
+        st.stop()
+
     if st.button("Generate Table"):
         rows = []
         times = list(range(0, int(max_time) + int(interval), int(interval)))
@@ -475,7 +498,9 @@ elif page == "Input Data":
             for rep in range(1, int(replicate) + 1):
                 for time in times:
                     rows.append({
-                        "Sample": sample,
+                        "Sample": sample_name,
+                        "Data Type": data_type,
+                        "Use Abbott Correction": use_abbott,
                         "Concentration": conc,
                         "Time": time,
                         "Replicate": rep,
@@ -485,7 +510,7 @@ elif page == "Input Data":
 
         st.session_state.input_df = pd.DataFrame(rows)
 
-    if "input_df" in st.session_state:
+    if not st.session_state.input_df.empty:
         st.write("Edit Initial and Alive values:")
 
         edited_df = st.data_editor(
@@ -499,6 +524,8 @@ elif page == "Input Data":
 
             required_columns = [
                 "Sample",
+                "Data Type",
+                "Use Abbott Correction",
                 "Concentration",
                 "Time",
                 "Replicate",
@@ -529,6 +556,10 @@ elif page == "Input Data":
                 st.error("Alive value cannot be greater than Initial value.")
                 st.stop()
 
+            if (df["Initial"] <= 0).any():
+                st.error("Initial value must be greater than 0.")
+                st.stop()
+
             df["Dead"] = df["Initial"] - df["Alive"]
             df["Mortality Decimal"] = df["Dead"] / df["Initial"]
             df["Mortality %"] = df["Mortality Decimal"] * 100
@@ -536,26 +567,31 @@ elif page == "Input Data":
             control_values = []
             corrected_values = []
 
-            if sample != "Control":
-                control_df = read_data("Control")
-
-                if control_df.empty:
-                    st.error("Please input and save Control data first.")
-                    st.stop()
-            else:
-                control_df = pd.DataFrame()
+            control_df = get_control_data()
 
             for _, row in df.iterrows():
                 mortality = float(row["Mortality Decimal"])
                 time = float(row["Time"])
                 rep = float(row["Replicate"])
+                row_data_type = str(row["Data Type"])
+                row_use_abbott = bool(row["Use Abbott Correction"])
 
-                if sample == "Control":
+                if row_data_type == "Control":
                     control = mortality
                     corrected = mortality
+
                 else:
-                    control = get_control_mortality(control_df, time, rep)
-                    corrected = abbott_corrected(mortality, control)
+                    if row_use_abbott:
+                        if control_df.empty:
+                            st.error("Abbott correction selected. Please input and save Control data first.")
+                            st.stop()
+
+                        control = get_control_mortality(control_df, time, rep)
+                        corrected = abbott_corrected(mortality, control)
+
+                    else:
+                        control = 0
+                        corrected = mortality
 
                 control_values.append(round(control * 100, 2))
                 corrected_values.append(round(corrected * 100, 2))
@@ -565,6 +601,8 @@ elif page == "Input Data":
 
             ordered_cols = [
                 "Sample",
+                "Data Type",
+                "Use Abbott Correction",
                 "Concentration",
                 "Time",
                 "Replicate",
@@ -579,9 +617,9 @@ elif page == "Input Data":
 
             df = df[ordered_cols]
 
-            save_data(sample, df)
+            save_data(sample_name, df)
 
-            st.success(f"{sample} data saved successfully.")
+            st.success(f"{sample_name} data saved successfully.")
             st.dataframe(df, use_container_width=True)
 
 
@@ -594,12 +632,14 @@ elif page == "Overall Data":
     if df.empty:
         st.warning("No data found. Please input data first.")
     else:
+        sample_options = ["All"] + get_sample_names(include_control=True)
+
         col1, col2 = st.columns(2)
 
         with col1:
             sample_filter = st.selectbox(
                 "Filter Sample",
-                ["All", "Control", "Gold", "Silver"]
+                sample_options
             )
 
         with col2:
@@ -630,179 +670,192 @@ elif page == "Overall Data":
 elif page == "Concentration-Response Sigmoid Graph":
     st.subheader("Concentration-Response Sigmoid Graph")
 
-    sample = st.selectbox("Sample", ["Gold", "Silver"])
-    df = read_data(sample)
+    sample_options = get_sample_names(include_control=False)
 
-    if df.empty:
-        st.warning(f"No {sample} data found.")
+    if not sample_options:
+        st.warning("No treatment sample data found. Please input data first.")
     else:
-        df = df[df["Sample"] == sample]
-        time = st.selectbox("Time", sorted(df["Time"].dropna().unique()))
+        sample_name = st.selectbox("Sample", sample_options)
 
-        plot_df = df[df["Time"] == time].copy()
-        plot_df = plot_df[plot_df["Concentration"] > 0]
+        df = read_data(sample_name)
 
-        try:
-            plot_df, k, lc50, r2, rmse = fit_sigmoid_lc50(plot_df)
+        if df.empty:
+            st.warning(f"No {sample_name} data found.")
+        else:
+            df = df[df["Sample"] == sample_name]
+            time = st.selectbox("Time", sorted(df["Time"].dropna().unique()))
 
-            fig, summary_df = create_sigmoid_figure(
-                sample,
-                time,
-                plot_df,
-                k,
-                lc50,
-                r2,
-                rmse
-            )
+            plot_df = df[df["Time"] == time].copy()
+            plot_df = plot_df[plot_df["Concentration"] > 0]
 
-            st.pyplot(fig)
+            try:
+                plot_df, k, lc50, r2 = fit_sigmoid_lc50(plot_df)
 
-            st.caption(
-                "Error bars represent standard deviation (SD) of corrected mortality "
-                "between replicates at each concentration."
-            )
+                fig, summary_df = create_sigmoid_figure(
+                    sample_name,
+                    time,
+                    plot_df,
+                    k,
+                    lc50,
+                    r2
+                )
 
-            col1, col2, col3 = st.columns(3)
+                st.pyplot(fig)
 
-            col1.metric("LC50 (%)", f"{lc50:.4f}")
-            col2.metric("R²", f"{r2:.4f}")
-            col3.metric("RMSE", f"{rmse:.4f}")
+                st.caption(
+                    "Error bars represent standard deviation (SD) of corrected mortality "
+                    "between replicates at each concentration."
+                )
 
-            st.write("Mean corrected mortality and error bars:")
-            st.dataframe(summary_df, use_container_width=True)
+                col1, col2 = st.columns(2)
 
-            st.write("Replicate data used for fitting:")
-            st.dataframe(plot_df, use_container_width=True)
+                col1.metric("LC50 (%)", f"{lc50:.4f}")
+                col2.metric("R²", f"{r2:.4f}")
 
-        except Exception as e:
-            st.error(f"Concentration-response sigmoid fitting failed: {e}")
+                st.write("Mean corrected mortality and error bars:")
+                st.dataframe(summary_df, use_container_width=True)
+
+                st.write("Replicate data used for fitting:")
+                st.dataframe(plot_df, use_container_width=True)
+
+            except Exception as e:
+                st.error(f"Concentration-response sigmoid fitting failed: {e}")
 
 
 # ================= LC50 SUMMARY =================
 elif page == "LC50 Summary":
     st.subheader("LC50 Calculation Summary and Manual Validation")
 
-    sample = st.selectbox("Sample", ["Gold", "Silver"])
-    df = read_data(sample)
+    sample_options = get_sample_names(include_control=False)
 
-    if df.empty:
-        st.warning(f"No {sample} data found.")
+    if not sample_options:
+        st.warning("No treatment sample data found. Please input data first.")
     else:
-        df = df[df["Sample"] == sample]
-        time = st.selectbox("Time", sorted(df["Time"].dropna().unique()))
+        sample_name = st.selectbox("Sample", sample_options)
 
-        temp = df[df["Time"] == time].copy()
-        temp = temp[temp["Concentration"] > 0]
+        df = read_data(sample_name)
 
-        if len(temp) < 3:
-            st.warning("At least three data points are recommended.")
+        if df.empty:
+            st.warning(f"No {sample_name} data found.")
         else:
-            try:
-                plot_df, k, lc50_gui, r2, rmse = fit_sigmoid_lc50(temp)
+            df = df[df["Sample"] == sample_name]
+            time = st.selectbox("Time", sorted(df["Time"].dropna().unique()))
 
-                lc50_manual, mean_df, message = manual_linear_interpolation_lc50(temp)
+            temp = df[df["Time"] == time].copy()
+            temp = temp[temp["Concentration"] > 0]
 
-                if pd.isna(lc50_manual):
-                    difference = np.nan
-                    deviation = np.nan
-                else:
-                    difference = abs(lc50_gui - lc50_manual)
-                    deviation = (difference / lc50_manual) * 100 if lc50_manual != 0 else np.nan
+            if len(temp) < 3:
+                st.warning("At least three data points are recommended.")
+            else:
+                try:
+                    plot_df, k, lc50_gui, r2 = fit_sigmoid_lc50(temp)
 
-                result_df = pd.DataFrame({
-                    "Parameter": [
-                        "Manual linear interpolation LC50 (%)",
-                        "Python GUI concentration-response sigmoid LC50 (%)",
-                        "Difference (%)",
-                        "Deviation (%)",
-                        "Slope parameter, k",
-                        "R²",
-                        "RMSE",
-                        "Toxicity Interpretation"
-                    ],
-                    "Value": [
-                        round(lc50_manual, 4) if not pd.isna(lc50_manual) else "Not available",
-                        round(lc50_gui, 4),
-                        round(difference, 4) if not pd.isna(difference) else "Not available",
-                        round(deviation, 4) if not pd.isna(deviation) else "Not available",
-                        round(k, 4),
-                        round(r2, 4),
-                        round(rmse, 4),
-                        toxicity_level(lc50_gui)
-                    ]
-                })
+                    lc50_manual, mean_df, message = manual_linear_interpolation_lc50(temp)
 
-                st.dataframe(result_df, use_container_width=True)
+                    if pd.isna(lc50_manual):
+                        difference = np.nan
+                        deviation = np.nan
+                    else:
+                        difference = abs(lc50_gui - lc50_manual)
+                        deviation = (difference / lc50_manual) * 100 if lc50_manual != 0 else np.nan
 
-                st.write("Mean corrected mortality values used for manual interpolation:")
-                st.dataframe(mean_df, use_container_width=True)
+                    result_df = pd.DataFrame({
+                        "Parameter": [
+                            "Manual linear interpolation LC50 (%)",
+                            "Python GUI concentration-response sigmoid LC50 (%)",
+                            "Difference (%)",
+                            "Deviation (%)",
+                            "Slope parameter, k",
+                            "R²",
+                            "Toxicity Interpretation"
+                        ],
+                        "Value": [
+                            round(lc50_manual, 4) if not pd.isna(lc50_manual) else "Not available",
+                            round(lc50_gui, 4),
+                            round(difference, 4) if not pd.isna(difference) else "Not available",
+                            round(deviation, 4) if not pd.isna(deviation) else "Not available",
+                            round(k, 4),
+                            round(r2, 4),
+                            toxicity_level(lc50_gui)
+                        ]
+                    })
 
-                if message != "OK":
-                    st.warning(message)
+                    st.dataframe(result_df, use_container_width=True)
 
-                st.info(
-                    "Manual interpolation is used only for software validation. "
-                    "The main LC50 output is generated using the concentration-response sigmoid model."
-                )
+                    st.write("Mean corrected mortality values used for manual interpolation:")
+                    st.dataframe(mean_df, use_container_width=True)
 
-            except Exception as e:
-                st.error(f"LC50 calculation failed: {e}")
+                    if message != "OK":
+                        st.warning(message)
+
+                    st.info(
+                        "Manual interpolation is used only for software validation. "
+                        "The main LC50 output is generated using the concentration-response sigmoid model."
+                    )
+
+                except Exception as e:
+                    st.error(f"LC50 calculation failed: {e}")
 
 
 # ================= PREDICTION =================
 elif page == "Prediction":
     st.subheader("LC50 Time Prediction")
 
-    sample = st.selectbox("Sample", ["Gold", "Silver"])
-    df = read_data(sample)
+    sample_options = get_sample_names(include_control=False)
 
-    if df.empty:
-        st.warning(f"No {sample} data found.")
+    if not sample_options:
+        st.warning("No treatment sample data found. Please input data first.")
     else:
-        df = df[df["Sample"] == sample]
+        sample_name = st.selectbox("Sample", sample_options)
 
-        results = []
+        df = read_data(sample_name)
 
-        for time in sorted(df["Time"].dropna().unique()):
-            if time == 0:
-                continue
-
-            temp = df[df["Time"] == time].copy()
-            temp = temp[temp["Concentration"] > 0]
-
-            if len(temp) < 3:
-                continue
-
-            try:
-                _, k, lc50, r2, rmse = fit_sigmoid_lc50(temp)
-
-                results.append({
-                    "Time": time,
-                    "LC50 (%)": round(lc50, 4),
-                    "R²": round(r2, 4),
-                    "RMSE": round(rmse, 4)
-                })
-
-            except Exception:
-                continue
-
-        if len(results) < 2:
-            st.warning("Not enough valid LC50 values for prediction.")
+        if df.empty:
+            st.warning(f"No {sample_name} data found.")
         else:
-            lc50_df = pd.DataFrame(results)
-            st.dataframe(lc50_df, use_container_width=True)
+            df = df[df["Sample"] == sample_name]
 
-            target_time = st.number_input("Predict Time (min)", value=45.0)
+            results = []
 
-            times = lc50_df["Time"].astype(float).values
-            lc50_values = lc50_df["LC50 (%)"].astype(float).values
+            for time in sorted(df["Time"].dropna().unique()):
+                if time == 0:
+                    continue
 
-            if target_time < min(times) or target_time > max(times):
-                coeff = np.polyfit(times, lc50_values, 1)
-                predicted_lc50 = coeff[0] * target_time + coeff[1]
-                st.warning("This is outside experimental range. Result is extrapolated.")
+                temp = df[df["Time"] == time].copy()
+                temp = temp[temp["Concentration"] > 0]
+
+                if len(temp) < 3:
+                    continue
+
+                try:
+                    _, k, lc50, r2 = fit_sigmoid_lc50(temp)
+
+                    results.append({
+                        "Time": time,
+                        "LC50 (%)": round(lc50, 4),
+                        "R²": round(r2, 4)
+                    })
+
+                except Exception:
+                    continue
+
+            if len(results) < 2:
+                st.warning("Not enough valid LC50 values for prediction.")
             else:
-                predicted_lc50 = np.interp(target_time, times, lc50_values)
+                lc50_df = pd.DataFrame(results)
+                st.dataframe(lc50_df, use_container_width=True)
 
-            st.success(f"Predicted LC50 at {target_time:.2f} min = {predicted_lc50:.4f}%")
-            st.write(f"Toxicity Interpretation: **{toxicity_level(predicted_lc50)}**")
+                target_time = st.number_input("Predict Time (min)", value=45.0)
+
+                times = lc50_df["Time"].astype(float).values
+                lc50_values = lc50_df["LC50 (%)"].astype(float).values
+
+                if target_time < min(times) or target_time > max(times):
+                    coeff = np.polyfit(times, lc50_values, 1)
+                    predicted_lc50 = coeff[0] * target_time + coeff[1]
+                    st.warning("This is outside experimental range. Result is extrapolated.")
+                else:
+                    predicted_lc50 = np.interp(target_time, times, lc50_values)
+
+                st.success(f"Predicted LC50 at {target_time:.2f} min = {predicted_lc50:.4f}%")
+                st.write(f"Toxicity Interpretation: **{toxicity_level(predicted_lc50)}**")
