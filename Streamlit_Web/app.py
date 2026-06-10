@@ -127,6 +127,23 @@ def get_control_mortality(control_df, time, replicate):
 
     control_df["Time"] = pd.to_numeric(control_df["Time"], errors="coerce")
     control_df["Replicate"] = pd.to_numeric(control_df["Replicate"], errors="coerce")
+
+    # Create Mortality Decimal if the column is missing
+    if "Mortality Decimal" not in control_df.columns:
+        if "Mortality %" in control_df.columns:
+            control_df["Mortality Decimal"] = pd.to_numeric(
+                control_df["Mortality %"],
+                errors="coerce"
+            ) / 100
+
+        elif "Dead" in control_df.columns and "Initial" in control_df.columns:
+            control_df["Dead"] = pd.to_numeric(control_df["Dead"], errors="coerce")
+            control_df["Initial"] = pd.to_numeric(control_df["Initial"], errors="coerce")
+            control_df["Mortality Decimal"] = control_df["Dead"] / control_df["Initial"]
+
+        else:
+            return 0
+
     control_df["Mortality Decimal"] = pd.to_numeric(
         control_df["Mortality Decimal"],
         errors="coerce"
@@ -178,12 +195,14 @@ def fit_sigmoid_lc50(df):
     # Initial guess: slope k = 0.15, LC50 near the median concentration.
     p0 = [0.15, np.median(x)]
 
+    upper_lc50_bound = max(100.0, float(np.max(x)) * 5)
+
     params, _ = curve_fit(
         sigmoid_model_percent,
         x,
         y,
         p0=p0,
-        bounds=([0.0001, 0.01], [5.0, 100.0]),
+        bounds=([0.0001, 0.01], [5.0, upper_lc50_bound]),
         maxfev=20000
     )
 
@@ -552,6 +571,7 @@ elif page == "Input Data":
                 "Initial",
                 "Alive",
                 "Dead",
+                "Mortality Decimal",
                 "Mortality %",
                 "Control Mortality %",
                 "Corrected Mortality %"
