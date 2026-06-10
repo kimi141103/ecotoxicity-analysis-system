@@ -369,7 +369,7 @@ def create_sigmoid_figure(sample_name, time, time_unit, plot_df, k1, lc50, r2):
     time_label = format_time_label(time, time_unit)
 
     ax.set_title(
-        f"Mortality Concentration Curve ({sample_name}, {time_label})",
+        f"Mortality Concentration-Response Curve({sample_name}, {time_label})",
         fontsize=14,
         fontweight="bold"
     )
