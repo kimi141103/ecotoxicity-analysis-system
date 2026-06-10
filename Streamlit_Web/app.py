@@ -19,6 +19,7 @@ if "gold_df" not in st.session_state:
 if "silver_df" not in st.session_state:
     st.session_state.silver_df = pd.DataFrame()
 
+
 # ================= FUNCTIONS =================
 def abbott_corrected(treatment_decimal, control_decimal):
     """
@@ -28,6 +29,7 @@ def abbott_corrected(treatment_decimal, control_decimal):
     """
     if control_decimal >= 1:
         return 0
+
     corrected = (treatment_decimal - control_decimal) / (1 - control_decimal)
     return max(0, min(corrected, 1))
 
@@ -35,10 +37,13 @@ def abbott_corrected(treatment_decimal, control_decimal):
 def sigmoid_model_percent(x, k, lc50):
     """
     Simple logistic sigmoid concentration-response model.
-    y is corrected mortality percentage from 0 to 100.
-    x is concentration percentage.
 
-    y = 100 / (1 + exp[-k(x - LC50)])
+    y = 100 / [1 + e^(-k(x - LC50))]
+
+    y = corrected mortality (%)
+    x = serum concentration (%)
+    k = slope of the curve
+    LC50 = concentration causing 50% mortality
     """
     return 100 / (1 + np.exp(-k * (x - lc50)))
 
@@ -46,6 +51,7 @@ def sigmoid_model_percent(x, k, lc50):
 def toxicity_level(lc50):
     if pd.isna(lc50):
         return "Not available"
+
     if lc50 < 1:
         return "Extremely toxic"
     elif lc50 < 10:
@@ -63,6 +69,7 @@ def read_data(sample):
         return st.session_state.gold_df.copy()
     elif sample == "Silver":
         return st.session_state.silver_df.copy()
+
     return pd.DataFrame()
 
 
@@ -107,14 +114,17 @@ def get_all_data():
 def get_control_mortality(control_df, time, replicate):
     """
     Get control mortality for Abbott correction.
-    First priority: same time and same replicate.
-    Fallback: average control mortality at the same time.
-    Fallback if unavailable: 0.
+
+    Priority:
+    1. Same time and same replicate
+    2. Average control mortality at the same time
+    3. If unavailable, control mortality = 0
     """
     if control_df.empty:
         return 0
 
     control_df = control_df.copy()
+
     control_df["Time"] = pd.to_numeric(control_df["Time"], errors="coerce")
     control_df["Replicate"] = pd.to_numeric(control_df["Replicate"], errors="coerce")
     control_df["Mortality Decimal"] = pd.to_numeric(
@@ -141,7 +151,6 @@ def get_control_mortality(control_df, time, replicate):
 def fit_sigmoid_lc50(df):
     """
     Fit simple logistic sigmoid model using all replicate corrected mortality values.
-    Returns parameters and fit statistics.
     """
     plot_df = df.copy()
     plot_df = plot_df[plot_df["Concentration"] > 0]
@@ -241,7 +250,12 @@ def manual_linear_interpolation_lc50(df):
 
 def create_sigmoid_figure(sample, time, plot_df, k, lc50, r2, rmse):
     """
-    Create a sigmoid graph with all replicate points and mean ± SD error bars.
+    Create a concentration-response sigmoid graph with:
+    - all replicate points
+    - mean ± SD error bars
+    - fitted concentration-response sigmoid curve
+    - LC50 line
+    - 50% corrected mortality line
     """
     x = plot_df["Concentration"].astype(float).values
     y = plot_df["Corrected Mortality %"].astype(float).values
@@ -273,6 +287,7 @@ def create_sigmoid_figure(sample, time, plot_df, k, lc50, r2, rmse):
         label="Replicate data points"
     )
 
+    # Error bars: mean ± standard deviation
     ax.errorbar(
         summary_df["Concentration"],
         summary_df["mean"],
@@ -286,6 +301,7 @@ def create_sigmoid_figure(sample, time, plot_df, k, lc50, r2, rmse):
 
     x_min = max(0.1, min(x) - 5)
     x_max = max(x) + 5
+
     x_line = np.linspace(x_min, x_max, 400)
     y_line = sigmoid_model_percent(x_line, k, lc50)
 
@@ -293,7 +309,7 @@ def create_sigmoid_figure(sample, time, plot_df, k, lc50, r2, rmse):
         x_line,
         y_line,
         linewidth=2.2,
-        label="Fitted logistic sigmoid curve"
+        label="Fitted concentration-response sigmoid curve"
     )
 
     ax.axhline(
@@ -311,7 +327,7 @@ def create_sigmoid_figure(sample, time, plot_df, k, lc50, r2, rmse):
     )
 
     ax.set_title(
-        f"Corrected Mortality Sigmoid Curve ({sample}, {time} min)",
+        f"Concentration-Response Sigmoid Curve ({sample}, {time} min)",
         fontsize=14
     )
 
@@ -348,7 +364,7 @@ page = st.sidebar.radio(
         "Home",
         "Input Data",
         "Overall Data",
-        "Sigmoid Graph",
+        "Concentration-Response Sigmoid Graph",
         "LC50 Summary",
         "Prediction"
     ]
@@ -364,7 +380,7 @@ if st.sidebar.button("Reset All Data"):
 
 # ================= TITLE =================
 st.title("Brine Shrimp Ecotoxicity Data Analysis System")
-st.caption("Streamlit Web Version | Sigmoid Concentration-Response Model")
+st.caption("Streamlit Web Version | Concentration-Response Sigmoid Model")
 
 
 # ================= HOME =================
@@ -380,7 +396,7 @@ if page == "Home":
     - Calculate mortality percentage
     - Calculate Abbott corrected mortality
     - View overall data
-    - Generate sigmoid concentration-response graph with replicate points and error bars
+    - Generate concentration-response sigmoid graph with replicate points and error bars
     - Calculate LC50 using the logistic sigmoid model
     - Validate LC50 using manual linear interpolation
     - Predict LC50 by time
@@ -590,9 +606,9 @@ elif page == "Overall Data":
         )
 
 
-# ================= SIGMOID GRAPH =================
-elif page == "Sigmoid Graph":
-    st.subheader("Corrected Mortality Sigmoid Graph")
+# ================= CONCENTRATION-RESPONSE SIGMOID GRAPH =================
+elif page == "Concentration-Response Sigmoid Graph":
+    st.subheader("Concentration-Response Sigmoid Graph")
 
     sample = st.selectbox("Sample", ["Gold", "Silver"])
     df = read_data(sample)
@@ -608,6 +624,7 @@ elif page == "Sigmoid Graph":
 
         try:
             plot_df, k, lc50, r2, rmse = fit_sigmoid_lc50(plot_df)
+
             fig, summary_df = create_sigmoid_figure(
                 sample,
                 time,
@@ -619,6 +636,11 @@ elif page == "Sigmoid Graph":
             )
 
             st.pyplot(fig)
+
+            st.caption(
+                "Error bars represent standard deviation (SD) of corrected mortality "
+                "between replicates at each concentration."
+            )
 
             col1, col2, col3 = st.columns(3)
 
@@ -633,7 +655,7 @@ elif page == "Sigmoid Graph":
             st.dataframe(plot_df, use_container_width=True)
 
         except Exception as e:
-            st.error(f"Sigmoid fitting failed: {e}")
+            st.error(f"Concentration-response sigmoid fitting failed: {e}")
 
 
 # ================= LC50 SUMMARY =================
@@ -670,7 +692,7 @@ elif page == "LC50 Summary":
                 result_df = pd.DataFrame({
                     "Parameter": [
                         "Manual linear interpolation LC50 (%)",
-                        "Python GUI sigmoid LC50 (%)",
+                        "Python GUI concentration-response sigmoid LC50 (%)",
                         "Difference (%)",
                         "Deviation (%)",
                         "Slope parameter, k",
@@ -700,7 +722,7 @@ elif page == "LC50 Summary":
 
                 st.info(
                     "Manual interpolation is used only for software validation. "
-                    "The main LC50 output is generated using the logistic sigmoid concentration-response model."
+                    "The main LC50 output is generated using the concentration-response sigmoid model."
                 )
 
             except Exception as e:
