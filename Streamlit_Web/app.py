@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from scipy.stats import norm
 from scipy.optimize import curve_fit
 import matplotlib.pyplot as plt
 
@@ -21,23 +20,32 @@ if "silver_df" not in st.session_state:
     st.session_state.silver_df = pd.DataFrame()
 
 # ================= FUNCTIONS =================
-def safe_probit(value):
-    value = min(max(value, 0.001), 0.999)
-    return norm.ppf(value) + 5
-
-
-def abbott_corrected(treatment, control):
-    if control >= 1:
+def abbott_corrected(treatment_decimal, control_decimal):
+    """
+    Abbott correction using mortality values in decimal form.
+    Example: 20% mortality = 0.20.
+    Returns corrected mortality in decimal form from 0 to 1.
+    """
+    if control_decimal >= 1:
         return 0
-    corrected = (treatment - control) / (1 - control)
+    corrected = (treatment_decimal - control_decimal) / (1 - control_decimal)
     return max(0, min(corrected, 1))
 
 
-def sigmoid_model(x, k1, k2):
-    return 1 / (1 + np.exp(-(k1 * x + k2)))
+def sigmoid_model_percent(x, k, lc50):
+    """
+    Simple logistic sigmoid concentration-response model.
+    y is corrected mortality percentage from 0 to 100.
+    x is concentration percentage.
+
+    y = 100 / (1 + exp[-k(x - LC50)])
+    """
+    return 100 / (1 + np.exp(-k * (x - lc50)))
 
 
 def toxicity_level(lc50):
+    if pd.isna(lc50):
+        return "Not available"
     if lc50 < 1:
         return "Extremely toxic"
     elif lc50 < 10:
@@ -96,6 +104,241 @@ def get_all_data():
     return pd.DataFrame()
 
 
+def get_control_mortality(control_df, time, replicate):
+    """
+    Get control mortality for Abbott correction.
+    First priority: same time and same replicate.
+    Fallback: average control mortality at the same time.
+    Fallback if unavailable: 0.
+    """
+    if control_df.empty:
+        return 0
+
+    control_df = control_df.copy()
+    control_df["Time"] = pd.to_numeric(control_df["Time"], errors="coerce")
+    control_df["Replicate"] = pd.to_numeric(control_df["Replicate"], errors="coerce")
+    control_df["Mortality Decimal"] = pd.to_numeric(
+        control_df["Mortality Decimal"],
+        errors="coerce"
+    )
+
+    same_rep = control_df[
+        (control_df["Time"] == time) &
+        (control_df["Replicate"] == replicate)
+    ]
+
+    if not same_rep.empty:
+        return float(same_rep["Mortality Decimal"].iloc[0])
+
+    same_time = control_df[control_df["Time"] == time]
+
+    if not same_time.empty:
+        return float(same_time["Mortality Decimal"].mean())
+
+    return 0
+
+
+def fit_sigmoid_lc50(df):
+    """
+    Fit simple logistic sigmoid model using all replicate corrected mortality values.
+    Returns parameters and fit statistics.
+    """
+    plot_df = df.copy()
+    plot_df = plot_df[plot_df["Concentration"] > 0]
+
+    plot_df["Concentration"] = pd.to_numeric(
+        plot_df["Concentration"],
+        errors="coerce"
+    )
+
+    plot_df["Corrected Mortality %"] = pd.to_numeric(
+        plot_df["Corrected Mortality %"],
+        errors="coerce"
+    )
+
+    plot_df = plot_df.dropna(
+        subset=["Concentration", "Corrected Mortality %"]
+    )
+
+    if len(plot_df) < 3:
+        raise ValueError("At least three data points are required for sigmoid fitting.")
+
+    x = plot_df["Concentration"].astype(float).values
+    y = plot_df["Corrected Mortality %"].astype(float).values
+
+    # Initial guess: slope k = 0.15, LC50 near the median concentration.
+    p0 = [0.15, np.median(x)]
+
+    params, _ = curve_fit(
+        sigmoid_model_percent,
+        x,
+        y,
+        p0=p0,
+        bounds=([0.0001, 0.01], [5.0, 100.0]),
+        maxfev=20000
+    )
+
+    k, lc50 = params
+    y_pred = sigmoid_model_percent(x, k, lc50)
+
+    ss_res = np.sum((y - y_pred) ** 2)
+    ss_total = np.sum((y - np.mean(y)) ** 2)
+
+    r2 = 1 - (ss_res / ss_total) if ss_total != 0 else 0
+    rmse = np.sqrt(np.mean((y - y_pred) ** 2))
+
+    return plot_df, k, lc50, r2, rmse
+
+
+def manual_linear_interpolation_lc50(df):
+    """
+    Manual LC50 validation using linear interpolation.
+    Uses the mean corrected mortality at each concentration.
+    LC50 is estimated between the two concentration levels surrounding 50% mortality.
+    """
+    temp = df.copy()
+    temp = temp[temp["Concentration"] > 0]
+
+    temp["Concentration"] = pd.to_numeric(
+        temp["Concentration"],
+        errors="coerce"
+    )
+
+    temp["Corrected Mortality %"] = pd.to_numeric(
+        temp["Corrected Mortality %"],
+        errors="coerce"
+    )
+
+    temp = temp.dropna(
+        subset=["Concentration", "Corrected Mortality %"]
+    )
+
+    mean_df = (
+        temp.groupby("Concentration", as_index=False)["Corrected Mortality %"]
+        .mean()
+        .sort_values("Concentration")
+    )
+
+    if len(mean_df) < 2:
+        return np.nan, mean_df, "Not enough concentration levels."
+
+    for i in range(len(mean_df) - 1):
+        c1 = float(mean_df.iloc[i]["Concentration"])
+        y1 = float(mean_df.iloc[i]["Corrected Mortality %"])
+
+        c2 = float(mean_df.iloc[i + 1]["Concentration"])
+        y2 = float(mean_df.iloc[i + 1]["Corrected Mortality %"])
+
+        if (y1 <= 50 <= y2) or (y2 <= 50 <= y1):
+            if y2 == y1:
+                return np.nan, mean_df, "Cannot interpolate because both mortality values are equal."
+
+            lc50 = c1 + ((50 - y1) / (y2 - y1)) * (c2 - c1)
+            return lc50, mean_df, "OK"
+
+    return np.nan, mean_df, "50% mortality is outside the observed concentration range."
+
+
+def create_sigmoid_figure(sample, time, plot_df, k, lc50, r2, rmse):
+    """
+    Create a sigmoid graph with all replicate points and mean ± SD error bars.
+    """
+    x = plot_df["Concentration"].astype(float).values
+    y = plot_df["Corrected Mortality %"].astype(float).values
+
+    summary_df = (
+        plot_df.groupby("Concentration")["Corrected Mortality %"]
+        .agg(["mean", "std"])
+        .reset_index()
+        .sort_values("Concentration")
+    )
+
+    summary_df["std"] = summary_df["std"].fillna(0)
+
+    fig, ax = plt.subplots(figsize=(10, 5.8))
+
+    # Jitter replicate points slightly so repeated points can be seen clearly.
+    x_jitter = np.zeros_like(x, dtype=float)
+
+    for conc in sorted(np.unique(x)):
+        idx = np.where(x == conc)[0]
+        offsets = np.linspace(-0.8, 0.8, len(idx)) if len(idx) > 1 else np.array([0.0])
+        x_jitter[idx] = offsets
+
+    ax.scatter(
+        x + x_jitter,
+        y,
+        s=70,
+        alpha=0.85,
+        label="Replicate data points"
+    )
+
+    ax.errorbar(
+        summary_df["Concentration"],
+        summary_df["mean"],
+        yerr=summary_df["std"],
+        fmt="s",
+        capsize=5,
+        markersize=7,
+        linewidth=1.8,
+        label="Mean ± SD"
+    )
+
+    x_min = max(0.1, min(x) - 5)
+    x_max = max(x) + 5
+    x_line = np.linspace(x_min, x_max, 400)
+    y_line = sigmoid_model_percent(x_line, k, lc50)
+
+    ax.plot(
+        x_line,
+        y_line,
+        linewidth=2.2,
+        label="Fitted logistic sigmoid curve"
+    )
+
+    ax.axhline(
+        50,
+        linestyle="--",
+        linewidth=1.3,
+        label="50% corrected mortality"
+    )
+
+    ax.axvline(
+        lc50,
+        linestyle="--",
+        linewidth=1.3,
+        label=f"LC50 = {lc50:.2f}%"
+    )
+
+    ax.set_title(
+        f"Corrected Mortality Sigmoid Curve ({sample}, {time} min)",
+        fontsize=14
+    )
+
+    ax.set_xlabel("Serum Concentration (%)", fontsize=12)
+    ax.set_ylabel("Corrected Mortality (%)", fontsize=12)
+    ax.set_ylim(-5, 105)
+    ax.set_xlim(x_min, x_max)
+    ax.grid(True, linestyle="--", alpha=0.45)
+    ax.legend(fontsize=9)
+
+    ax.text(
+        0.58,
+        0.15,
+        f"y = 100 / [1 + e^(-k(x - LC50))]\n"
+        f"k = {k:.4f}\n"
+        f"LC50 = {lc50:.2f}%\n"
+        f"R² = {r2:.4f}\n"
+        f"RMSE = {rmse:.4f}",
+        transform=ax.transAxes,
+        bbox=dict(facecolor="white", edgecolor="gray", alpha=0.95)
+    )
+
+    fig.tight_layout()
+
+    return fig, summary_df
+
+
 # ================= SIDEBAR =================
 st.sidebar.title("Navigation")
 
@@ -105,7 +348,6 @@ page = st.sidebar.radio(
         "Home",
         "Input Data",
         "Overall Data",
-        "Probit Graph",
         "Sigmoid Graph",
         "LC50 Summary",
         "Prediction"
@@ -119,9 +361,10 @@ if st.sidebar.button("Reset All Data"):
     st.success("All data cleared.")
     st.rerun()
 
+
 # ================= TITLE =================
 st.title("Brine Shrimp Ecotoxicity Data Analysis System")
-st.caption("Streamlit Web Version")
+st.caption("Streamlit Web Version | Sigmoid Concentration-Response Model")
 
 
 # ================= HOME =================
@@ -129,18 +372,24 @@ if page == "Home":
     st.subheader("Main Dashboard")
 
     st.write("""
-    This web system allows users to input their own brine shrimp ecotoxicity data
-    and perform toxicity analysis.
+    This web system allows users to input brine shrimp ecotoxicity data and perform
+    LC50 analysis using a simplified logistic sigmoid concentration-response model.
 
     Main modules:
-    - Input experimental mortality data
+    - Input experimental alive/dead data
+    - Calculate mortality percentage
     - Calculate Abbott corrected mortality
     - View overall data
-    - Generate Probit graph
-    - Generate Sigmoid graph
-    - Calculate LC50
+    - Generate sigmoid concentration-response graph with replicate points and error bars
+    - Calculate LC50 using the logistic sigmoid model
+    - Validate LC50 using manual linear interpolation
     - Predict LC50 by time
     """)
+
+    st.info(
+        "Selected model: y = 100 / [1 + e^(-k(x - LC50))], where y is corrected mortality (%) "
+        "and x is serum concentration (%)."
+    )
 
 
 # ================= INPUT DATA =================
@@ -159,8 +408,8 @@ elif page == "Input Data":
 
     with col3:
         replicate = st.number_input(
-            "Replicate",
-            value=1 if sample == "Control" else 2,
+            "Number of Replicates",
+            value=2,
             min_value=1
         )
 
@@ -172,11 +421,16 @@ elif page == "Input Data":
         st.info("Control concentration is automatically set as 0%.")
     else:
         conc_text = st.text_input("Concentration (%)", "10,30,50")
-        concentrations = [
-            float(x.strip())
-            for x in conc_text.split(",")
-            if x.strip() != ""
-        ]
+
+        try:
+            concentrations = [
+                float(x.strip())
+                for x in conc_text.split(",")
+                if x.strip() != ""
+            ]
+        except ValueError:
+            st.error("Please enter concentrations as numbers separated by commas, for example: 10,30,50")
+            st.stop()
 
     if st.button("Generate Table"):
         rows = []
@@ -208,57 +462,86 @@ elif page == "Input Data":
         if st.button("Calculate and Save Data"):
             df = edited_df.copy()
 
+            required_columns = [
+                "Sample",
+                "Concentration",
+                "Time",
+                "Replicate",
+                "Initial",
+                "Alive"
+            ]
+
+            missing_columns = [
+                col for col in required_columns
+                if col not in df.columns
+            ]
+
+            if missing_columns:
+                st.error(f"Missing required columns: {missing_columns}")
+                st.stop()
+
+            df["Initial"] = pd.to_numeric(df["Initial"], errors="coerce")
+            df["Alive"] = pd.to_numeric(df["Alive"], errors="coerce")
+            df["Concentration"] = pd.to_numeric(df["Concentration"], errors="coerce")
+            df["Time"] = pd.to_numeric(df["Time"], errors="coerce")
+            df["Replicate"] = pd.to_numeric(df["Replicate"], errors="coerce")
+
+            if df[["Initial", "Alive", "Concentration", "Time", "Replicate"]].isna().any().any():
+                st.error("Please make sure all input values are numeric.")
+                st.stop()
+
+            if (df["Alive"] > df["Initial"]).any():
+                st.error("Alive value cannot be greater than Initial value.")
+                st.stop()
+
             df["Dead"] = df["Initial"] - df["Alive"]
             df["Mortality Decimal"] = df["Dead"] / df["Initial"]
             df["Mortality %"] = df["Mortality Decimal"] * 100
 
-            control_dict = {}
+            control_values = []
+            corrected_values = []
 
-            if sample == "Control":
-                for _, row in df.iterrows():
-                    key = (int(row["Time"]), int(row["Replicate"]))
-                    control_dict[key] = float(row["Mortality Decimal"])
-            else:
+            if sample != "Control":
                 control_df = read_data("Control")
 
                 if control_df.empty:
                     st.error("Please input and save Control data first.")
                     st.stop()
-
-                for _, row in control_df.iterrows():
-                    key = (int(row["Time"]), int(row["Replicate"]))
-                    control_dict[key] = float(row["Mortality Decimal"])
-
-            control_values = []
-            corrected_values = []
-            probit_values = []
-            log_values = []
+            else:
+                control_df = pd.DataFrame()
 
             for _, row in df.iterrows():
                 mortality = float(row["Mortality Decimal"])
-                time = int(row["Time"])
-                rep = int(row["Replicate"])
+                time = float(row["Time"])
+                rep = float(row["Replicate"])
 
                 if sample == "Control":
                     control = mortality
                     corrected = mortality
                 else:
-                    control = control_dict.get((time, rep), 0)
+                    control = get_control_mortality(control_df, time, rep)
                     corrected = abbott_corrected(mortality, control)
 
                 control_values.append(round(control * 100, 2))
                 corrected_values.append(round(corrected * 100, 2))
-                probit_values.append(round(safe_probit(corrected), 4))
-
-                if row["Concentration"] == 0:
-                    log_values.append("")
-                else:
-                    log_values.append(round(np.log10(row["Concentration"]), 4))
 
             df["Control Mortality %"] = control_values
             df["Corrected Mortality %"] = corrected_values
-            df["Probit"] = probit_values
-            df["Log Conc"] = log_values
+
+            ordered_cols = [
+                "Sample",
+                "Concentration",
+                "Time",
+                "Replicate",
+                "Initial",
+                "Alive",
+                "Dead",
+                "Mortality %",
+                "Control Mortality %",
+                "Corrected Mortality %"
+            ]
+
+            df = df[ordered_cols]
 
             save_data(sample, df)
 
@@ -292,7 +575,7 @@ elif page == "Overall Data":
         if conc_filter.strip() != "":
             try:
                 df = df[df["Concentration"].astype(float) == float(conc_filter)]
-            except:
+            except ValueError:
                 st.error("Concentration must be numeric.")
 
         st.dataframe(df, use_container_width=True)
@@ -305,69 +588,6 @@ elif page == "Overall Data":
             file_name="overall_data.csv",
             mime="text/csv"
         )
-
-
-# ================= PROBIT GRAPH =================
-elif page == "Probit Graph":
-    st.subheader("Probit vs Log Concentration Graph")
-
-    sample = st.selectbox("Sample", ["Gold", "Silver"])
-    df = read_data(sample)
-
-    if df.empty:
-        st.warning(f"No {sample} data found.")
-    else:
-        df = df[df["Sample"] == sample]
-        time = st.selectbox("Time", sorted(df["Time"].dropna().unique()))
-
-        plot_df = df[df["Time"] == time].copy()
-        plot_df = plot_df[plot_df["Concentration"] > 0]
-
-        plot_df["Log Conc"] = pd.to_numeric(plot_df["Log Conc"], errors="coerce")
-        plot_df["Probit"] = pd.to_numeric(plot_df["Probit"], errors="coerce")
-        plot_df = plot_df.dropna(subset=["Log Conc", "Probit"])
-
-        if len(plot_df) < 2:
-            st.warning("At least two data points are required.")
-        else:
-            x = plot_df["Log Conc"].astype(float).values
-            y = plot_df["Probit"].astype(float).values
-
-            slope, intercept = np.polyfit(x, y, 1)
-            y_pred = slope * x + intercept
-
-            ss_res = np.sum((y - y_pred) ** 2)
-            ss_total = np.sum((y - np.mean(y)) ** 2)
-            r2 = 1 - (ss_res / ss_total) if ss_total != 0 else 0
-
-            log_lc50 = (5 - intercept) / slope
-            lc50 = 10 ** log_lc50
-
-            fig, ax = plt.subplots(figsize=(10, 5.5))
-            ax.scatter(x, y, label="Replicate Data Points")
-
-            x_line = np.linspace(min(x) - 0.05, max(x) + 0.05, 100)
-            ax.plot(x_line, slope * x_line + intercept, label="Linear Regression Line")
-
-            ax.axhline(5, linestyle="--", label="Probit 5 = 50% Mortality")
-            ax.axvline(log_lc50, linestyle="--", label=f"LC50 = {lc50:.2f}%")
-
-            ax.set_title(f"Probit vs Log Concentration ({sample}, {time} min)")
-            ax.set_xlabel("Log Concentration")
-            ax.set_ylabel("Probit")
-            ax.grid(True, linestyle="--", alpha=0.5)
-            ax.legend()
-
-            ax.text(
-                0.05,
-                0.15,
-                f"y = {slope:.4f}x + {intercept:.4f}\nR² = {r2:.4f}\nLC50 = {lc50:.2f}%",
-                transform=ax.transAxes,
-                bbox=dict(facecolor="white", edgecolor="gray")
-            )
-
-            st.pyplot(fig)
-            st.dataframe(plot_df, use_container_width=True)
 
 
 # ================= SIGMOID GRAPH =================
@@ -386,79 +606,39 @@ elif page == "Sigmoid Graph":
         plot_df = df[df["Time"] == time].copy()
         plot_df = plot_df[plot_df["Concentration"] > 0]
 
-        plot_df["Log Conc"] = pd.to_numeric(plot_df["Log Conc"], errors="coerce")
-        plot_df["Corrected Mortality %"] = pd.to_numeric(
-            plot_df["Corrected Mortality %"],
-            errors="coerce"
-        )
+        try:
+            plot_df, k, lc50, r2, rmse = fit_sigmoid_lc50(plot_df)
+            fig, summary_df = create_sigmoid_figure(
+                sample,
+                time,
+                plot_df,
+                k,
+                lc50,
+                r2,
+                rmse
+            )
 
-        plot_df = plot_df.dropna(subset=["Log Conc", "Corrected Mortality %"])
+            st.pyplot(fig)
 
-        if len(plot_df) < 3:
-            st.warning("At least three data points are recommended for sigmoid fitting.")
-        else:
-            try:
-                x = plot_df["Log Conc"].astype(float).values
-                y = plot_df["Corrected Mortality %"].astype(float).values / 100
+            col1, col2, col3 = st.columns(3)
 
-                params, _ = curve_fit(
-                    sigmoid_model,
-                    x,
-                    y,
-                    p0=[5, -5],
-                    maxfev=10000
-                )
+            col1.metric("LC50 (%)", f"{lc50:.4f}")
+            col2.metric("R²", f"{r2:.4f}")
+            col3.metric("RMSE", f"{rmse:.4f}")
 
-                k1, k2 = params
-                y_pred = sigmoid_model(x, k1, k2)
+            st.write("Mean corrected mortality and error bars:")
+            st.dataframe(summary_df, use_container_width=True)
 
-                ss_res = np.sum((y - y_pred) ** 2)
-                ss_total = np.sum((y - np.mean(y)) ** 2)
-                r2 = 1 - (ss_res / ss_total) if ss_total != 0 else 0
+            st.write("Replicate data used for fitting:")
+            st.dataframe(plot_df, use_container_width=True)
 
-                log_lc50 = -k2 / k1
-                lc50 = 10 ** log_lc50
-
-                fig, ax = plt.subplots(figsize=(10, 5.5))
-
-                ax.scatter(x, y * 100, label="Replicate Data Points")
-
-                x_line = np.linspace(min(x) - 0.05, max(x) + 0.05, 300)
-                y_line = sigmoid_model(x_line, k1, k2) * 100
-
-                ax.plot(x_line, y_line, label="Fitted Sigmoid Curve")
-                ax.axhline(50, linestyle="--", label="50% Corrected Mortality")
-                ax.axvline(log_lc50, linestyle="--", label=f"LC50 = {lc50:.2f}%")
-
-                ax.set_title(f"Corrected Mortality Sigmoid Curve ({sample}, {time} min)")
-                ax.set_xlabel("Log Concentration")
-                ax.set_ylabel("Corrected Mortality (%)")
-                ax.set_ylim(-5, 105)
-                ax.grid(True, linestyle="--", alpha=0.5)
-                ax.legend()
-
-                ax.text(
-                    0.62,
-                    0.15,
-                    f"y = 1 / (1 + e^-({k1:.4f}x + {k2:.4f}))\n"
-                    f"k1 = {k1:.4f}\n"
-                    f"k2 = {k2:.4f}\n"
-                    f"R² = {r2:.4f}\n"
-                    f"LC50 = {lc50:.2f}%",
-                    transform=ax.transAxes,
-                    bbox=dict(facecolor="white", edgecolor="gray")
-                )
-
-                st.pyplot(fig)
-                st.dataframe(plot_df, use_container_width=True)
-
-            except Exception as e:
-                st.error(f"Sigmoid fitting failed: {e}")
+        except Exception as e:
+            st.error(f"Sigmoid fitting failed: {e}")
 
 
 # ================= LC50 SUMMARY =================
 elif page == "LC50 Summary":
-    st.subheader("LC50 Calculation Summary")
+    st.subheader("LC50 Calculation Summary and Manual Validation")
 
     sample = st.selectbox("Sample", ["Gold", "Silver"])
     df = read_data(sample)
@@ -469,47 +649,62 @@ elif page == "LC50 Summary":
         df = df[df["Sample"] == sample]
         time = st.selectbox("Time", sorted(df["Time"].dropna().unique()))
 
-        df = df[df["Time"] == time]
-        df = df[df["Concentration"] > 0]
+        temp = df[df["Time"] == time].copy()
+        temp = temp[temp["Concentration"] > 0]
 
-        df["Log Conc"] = pd.to_numeric(df["Log Conc"], errors="coerce")
-        df["Probit"] = pd.to_numeric(df["Probit"], errors="coerce")
-        df["Corrected Mortality %"] = pd.to_numeric(
-            df["Corrected Mortality %"],
-            errors="coerce"
-        )
-
-        df = df.dropna(subset=["Log Conc", "Probit", "Corrected Mortality %"])
-
-        if len(df) < 3:
+        if len(temp) < 3:
             st.warning("At least three data points are recommended.")
         else:
-            x = df["Log Conc"].astype(float).values
+            try:
+                plot_df, k, lc50_gui, r2, rmse = fit_sigmoid_lc50(temp)
 
-            probit_y = df["Probit"].astype(float).values
-            slope, intercept = np.polyfit(x, probit_y, 1)
-            lc50_probit = 10 ** ((5 - intercept) / slope)
+                lc50_manual, mean_df, message = manual_linear_interpolation_lc50(temp)
 
-            y = df["Corrected Mortality %"].astype(float).values / 100
-            params, _ = curve_fit(sigmoid_model, x, y, p0=[5, -5], maxfev=10000)
-            k1, k2 = params
-            lc50_sigmoid = 10 ** (-k2 / k1)
+                if pd.isna(lc50_manual):
+                    difference = np.nan
+                    deviation = np.nan
+                else:
+                    difference = abs(lc50_gui - lc50_manual)
+                    deviation = (difference / lc50_manual) * 100 if lc50_manual != 0 else np.nan
 
-            result_df = pd.DataFrame({
-                "Method": ["Probit Analysis", "Sigmoid Analysis"],
-                "LC50 (%)": [round(lc50_probit, 4), round(lc50_sigmoid, 4)],
-                "Toxicity Interpretation": [
-                    toxicity_level(lc50_probit),
-                    toxicity_level(lc50_sigmoid)
-                ]
-            })
+                result_df = pd.DataFrame({
+                    "Parameter": [
+                        "Manual linear interpolation LC50 (%)",
+                        "Python GUI sigmoid LC50 (%)",
+                        "Difference (%)",
+                        "Deviation (%)",
+                        "Slope parameter, k",
+                        "R²",
+                        "RMSE",
+                        "Toxicity Interpretation"
+                    ],
+                    "Value": [
+                        round(lc50_manual, 4) if not pd.isna(lc50_manual) else "Not available",
+                        round(lc50_gui, 4),
+                        round(difference, 4) if not pd.isna(difference) else "Not available",
+                        round(deviation, 4) if not pd.isna(deviation) else "Not available",
+                        round(k, 4),
+                        round(r2, 4),
+                        round(rmse, 4),
+                        toxicity_level(lc50_gui)
+                    ]
+                })
 
-            st.dataframe(result_df, use_container_width=True)
+                st.dataframe(result_df, use_container_width=True)
 
-            st.info(
-                "Probit LC50 is recommended as the main toxicological LC50 value, "
-                "while sigmoid LC50 is used for dose-response model comparison."
-            )
+                st.write("Mean corrected mortality values used for manual interpolation:")
+                st.dataframe(mean_df, use_container_width=True)
+
+                if message != "OK":
+                    st.warning(message)
+
+                st.info(
+                    "Manual interpolation is used only for software validation. "
+                    "The main LC50 output is generated using the logistic sigmoid concentration-response model."
+                )
+
+            except Exception as e:
+                st.error(f"LC50 calculation failed: {e}")
 
 
 # ================= PREDICTION =================
@@ -533,32 +728,20 @@ elif page == "Prediction":
             temp = df[df["Time"] == time].copy()
             temp = temp[temp["Concentration"] > 0]
 
-            temp["Log Conc"] = pd.to_numeric(temp["Log Conc"], errors="coerce")
-            temp["Corrected Mortality %"] = pd.to_numeric(
-                temp["Corrected Mortality %"],
-                errors="coerce"
-            )
-
-            temp = temp.dropna(subset=["Log Conc", "Corrected Mortality %"])
-
             if len(temp) < 3:
                 continue
 
             try:
-                x = temp["Log Conc"].astype(float).values
-                y = temp["Corrected Mortality %"].astype(float).values / 100
-
-                params, _ = curve_fit(sigmoid_model, x, y, p0=[5, -5], maxfev=10000)
-                k1, k2 = params
-
-                lc50 = 10 ** (-k2 / k1)
+                _, k, lc50, r2, rmse = fit_sigmoid_lc50(temp)
 
                 results.append({
                     "Time": time,
-                    "LC50 (%)": round(lc50, 4)
+                    "LC50 (%)": round(lc50, 4),
+                    "R²": round(r2, 4),
+                    "RMSE": round(rmse, 4)
                 })
 
-            except:
+            except Exception:
                 continue
 
         if len(results) < 2:
